@@ -6,13 +6,19 @@ on:
     branches:
       - main
 
+# Cancel duplicate runs on the same PR/branch, but keep history on main.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 # Default to read-only. Individual jobs may grant additional scopes if needed.
 permissions:
   contents: read
 
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       contents: read
@@ -27,4 +33,139 @@ jobs:
           go-version-file: go.mod
 
       - run: go mod download
-      - run: make check
+      - run: make fmt-check
+      - run: make lint
+      - run: make typecheck
+      - run: make deadcode
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      # The e2e test shells out to `git`. Confirm it's available so a missing
+      # binary fails loud here instead of producing a confusing test error.
+      - name: Verify git is available
+        run: git --version
+
+      - run: go mod download
+
+      - name: Run tests with race detector
+        run: go test -race -shuffle=on ./...
+
+      - name: Enforce coverage threshold (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: make coverage
+
+      - name: Upload coverage profile
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - run: go mod download
+      - run: make vuln
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - run: go mod download
+
+      # Cross-compile sanity check using the same flags as release.yml. We do
+      # not upload the binary here — release.yml is the canonical producer of
+      # signed, reproducible artifacts. This job exists so PRs catch breakage
+      # in a target before it reaches a tag.
+      - name: Cross-compile
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath -buildvcs=true -o /dev/null ./cmd/git-real
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+
+      - run: go mod download
+
+      - name: Lint workflow files (actionlint)
+        run: make actionlint
+
+      - name: Audit workflows for security anti-patterns (zizmor)
+        run: |
+          pipx install zizmor
+          zizmor --persona=auditor --format=plain .github/workflows

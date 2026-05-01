@@ -19,7 +19,7 @@ LDFLAGS := -s -w \
 	-X main.commit=$(COMMIT) \
 	-X main.date=$(DATE)
 
-.PHONY: build fmt fmt-check lint typecheck deadcode test coverage check
+.PHONY: build fmt fmt-check lint typecheck deadcode test test-race coverage vuln actionlint check
 
 build:
 	$(GO) build -trimpath -buildvcs=true -ldflags='$(LDFLAGS)' -o git-real ./cmd/git-real
@@ -51,7 +51,16 @@ deadcode:
 test:
 	$(GO) test ./...
 
+test-race:
+	$(GO) test -race -shuffle=on ./...
+
 coverage:
 	COVERAGE_THRESHOLD=$(COVERAGE_THRESHOLD) bash ./scripts/check-coverage.sh
+
+vuln:
+	$(GO) tool govulncheck ./...
+
+actionlint:
+	$(GO) tool actionlint
 
 check: fmt-check lint typecheck deadcode coverage
