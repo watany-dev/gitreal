@@ -12,7 +12,7 @@ Run this immediately before presenting a substantial implementation plan.
 Collect the minimum relevant context:
 
 1. the current draft plan
-2. `AGENT.md`
+2. `AGENTS.md`
 3. related design docs, ADRs, requirements, roadmap items, issue notes, and `docs/development-memo.md`
 4. the source files and manifests the plan touches
 

@@ -523,18 +523,24 @@ func nextRandomSlot(base time.Time, rng *rand.Rand) time.Time {
 	return slot
 }
 
-func printHelp(w io.Writer) {
-	fmt.Fprintln(w, `git-real - BeReal-inspired punishment CLI for Git
+var commandUsages = []string{
+	"git real init",
+	"git real status",
+	"git real once [--grace-seconds=120]",
+	"git real start [--grace-seconds=120]",
+	"git real arm",
+	"git real disarm",
+	"git real rescue list",
+	"git real rescue restore <backup-ref>",
+}
 
-Usage:
-  git real init
-  git real status
-  git real once [--grace-seconds=120]
-  git real start [--grace-seconds=120]
-  git real arm
-  git real disarm
-  git real rescue list
-  git real rescue restore <backup-ref>`)
+func printHelp(w io.Writer) {
+	fmt.Fprintln(w, "git-real - BeReal-inspired punishment CLI for Git")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Usage:")
+	for _, usage := range commandUsages {
+		fmt.Fprintf(w, "  %s\n", usage)
+	}
 }
 
 func (a *app) fail(err error) int {

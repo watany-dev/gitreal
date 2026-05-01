@@ -15,7 +15,7 @@ Read only what is relevant:
 2. `docs/development-memo.md` when present
 3. the source directories touched by the design
 4. build manifests and CI workflows that constrain implementation
-5. `AGENT.md`
+5. `AGENTS.md`
 
 If design docs do not exist, report that first and switch to proposing a minimal design outline derived from the current memo and README.
 
