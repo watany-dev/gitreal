@@ -76,7 +76,10 @@ jobs:
 
           # Pin the build timestamp to the tag commit's author date so that
           # rebuilding from the same source produces a byte-identical binary.
-          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          # (declare and export separately so a `git log` failure isn't masked
+          #  by `export`'s exit status — shellcheck SC2155)
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
 
           go build \
             -trimpath \
