@@ -1,88 +1,142 @@
 # GitReal
 
-BeReal, but for Git.  
-When the notification hits, you have 2 minutes to push.  
-Miss it, and your local commits become unreal.
+GitReal is a Git subcommand that turns "I should push later" into a deadline.
 
-## What It Is
+When a challenge fires, you have 2 minutes to push your local commits. If you miss the window, GitReal can reset your branch back to its upstream state. By default, it stays in dry-run mode, so you can try the workflow before allowing destructive behavior.
 
-GitReal is a Git subcommand distributed as a `git-real` executable. When that binary is on your `PATH`, Git automatically exposes it as:
+The distributed binary is named `git-real`, and Git exposes it to users as:
 
 ```bash
 git real
 ```
 
-That means the user-facing command is `git real`, while the shipped executable name is `git-real`.
+## Why You Would Use It
 
-## MVP Commands
+- You want a push habit, not just a reminder.
+- You want the pressure of a timer without giving up recovery options.
+- You want to try it safely before enabling real resets.
+
+## Quick Start
+
+Install:
+
+```bash
+go install github.com/watany-dev/gitreal/cmd/git-real@latest
+```
+
+Try it in a repository:
 
 ```bash
 git real init
 git real status
 git real once
+```
+
+`git real once`, `git real start`, `git real arm`, and `git real disarm` require `git real init` first. `git real status` and `git real rescue ...` are still available before initialization.
+
+If you want GitReal to run continuously in the foreground:
+
+```bash
 git real start
+```
+
+## What Happens In Practice
+
+1. Run `git real init` once per repository.
+2. GitReal stores repo-local config and starts in dry-run mode.
+3. A challenge checks whether your current branch is ahead of its upstream.
+4. If you push in time, nothing happens.
+5. If you miss the deadline:
+
+- in dry-run mode, GitReal only tells you what it would have reset
+- in armed mode, GitReal backs up `HEAD` and resets the branch to `@{u}`
+
+## Safety First
+
+GitReal is intentionally conservative:
+
+- Default mode is dry-run.
+- Destructive behavior requires an explicit `git real arm`.
+- Before any reset, GitReal stores the current `HEAD` under `refs/gitreal/backups/...`.
+- `git real rescue restore <ref>` also backs up the current `HEAD` before restoring a backup.
+- Dirty worktree changes are stashed and then restored when possible.
+
+If you want real enforcement for the current repository:
+
+```bash
+git real arm
+```
+
+To go back to safe mode:
+
+```bash
+git real disarm
+```
+
+## Recovery
+
+List available backups:
+
+```bash
+git real rescue list
+```
+
+Restore one:
+
+```bash
+git real rescue restore <ref>
+```
+
+## Commands
+
+```bash
+git real init
+git real status
+git real once [--grace-seconds=120]
+git real start [--grace-seconds=120]
 git real arm
 git real disarm
 git real rescue list
 git real rescue restore <ref>
 ```
 
-## Quick Start
+Command intent:
+
+- `git real init`: enable GitReal for the current repository and write default config
+- `git real status`: show current repo state, upstream, and ahead count
+- `git real once`: run one challenge immediately
+- `git real start`: stay in the foreground and schedule hourly random challenges over time
+- `git real arm`: allow real resets for missed deadlines
+- `git real disarm`: return to dry-run mode
+- `git real rescue ...`: inspect and restore backup refs
+
+## Current Limits
+
+This beta currently expects:
+
+- the current branch has an upstream branch
+- the repository is not in detached `HEAD`
+- desktop notifications may fail and fall back to terminal output
+- `git real start` is the current scheduler entrypoint
+- `git real daemon` is not implemented yet
+
+## Configuration
+
+GitReal stores settings in Git config:
 
 ```bash
-# install with go install
-go install github.com/watany-dev/gitreal/cmd/git-real@latest
-
-# initialize the current repository
-git real init
-
-# inspect current state
-git real status
-
-# run one dry-run challenge now
-git real once
-
-# run the foreground scheduler
-git real start
+git config --local gitreal.enabled true
+git config --local gitreal.armed false
+git config --local gitreal.graceSeconds 120
 ```
 
-`git real once`, `git real start`, `git real arm`, and `git real disarm` require `git real init` first. `git real status` and `git real rescue ...` remain available before initialization.
+Current keys:
 
-## Safety Model
+- `gitreal.enabled`
+- `gitreal.armed`
+- `gitreal.graceSeconds`
 
-- Default mode is dry-run.
-- Destructive behavior must be explicitly armed with `git real arm`.
-- Before any reset, GitReal stores the current `HEAD` under `refs/gitreal/backups/...`.
-- `git real rescue restore <ref>` also backs up the current `HEAD` before restoring the selected backup ref.
-- Recovery is done with `git real rescue list` and `git real rescue restore <ref>`.
-
-## Current Implementation
-
-- Language: Go
-- Binary name: `git-real`
-- Git integration: invoke Git commands directly instead of reading `.git` internals
-- Repository config: `gitreal.enabled`, `gitreal.armed`, `gitreal.graceSeconds`
-- Scheduler model:
-  - `git real once` runs one challenge immediately
-  - `git real start` is the current foreground scheduler entrypoint with hourly random timing
-  - `git real daemon` remains a future background/service entrypoint and is not part of the current beta
-
-Current package layout:
-
-- `cmd/git-real`: executable entrypoint
-- `internal/cli`: command dispatch and challenge flow
-- `internal/git`: Git command wrapper and backup helpers
-- `internal/notify`: best-effort desktop notifications
-- `internal/challenge`: grace-period constants and normalization
-
-## Current Constraints
-
-- An upstream branch is required for challenge execution.
-- Detached `HEAD` is not supported.
-- Desktop notifications are best-effort and fall back to terminal output when unavailable.
-- `git real daemon` is not implemented in the current beta.
-
-## Local Build Target
+## Build From Source
 
 ```bash
 go build -o git-real ./cmd/git-real
@@ -90,7 +144,7 @@ go build -o git-real ./cmd/git-real
 
 ## Development
 
-Bootstrap and validate locally:
+Project checks:
 
 ```bash
 go mod download
@@ -99,28 +153,14 @@ make test
 make check
 ```
 
-Checks included in `make check`:
+`make check` runs formatting, linting, type-check compilation, dead-code detection, and the coverage gate.
 
-- formatting check with `gofmt`
-- linting with `go vet` and `staticcheck`
-- type-check/compile with `go test -run '^$' ./...`
-- dead code detection with `deadcode`
-- coverage gate at `95%`
-
-Property-based tests are included with the standard library `testing/quick`.
-
-## Expected Install Paths
+## Releases
 
 Current beta distribution targets:
 
-- GitHub Releases with per-OS archives for macOS, Linux, and Windows
 - `go install`
-
-Example commands:
-
-```bash
-go install github.com/watany-dev/gitreal/cmd/git-real@latest
-```
+- GitHub Releases for macOS, Linux, and Windows
 
 Release archives are published as:
 
@@ -131,6 +171,6 @@ Release archives are published as:
 - `git-real_windows_amd64.zip`
 - `SHA256SUMS`
 
-## Notes
+## More Detail
 
-Detailed design notes, command rationale, Git plumbing choices, and the original prototype notes are stored in [docs/development-memo.md](/workspaces/gitreal/docs/development-memo.md).
+Design notes and implementation rationale live in [docs/development-memo.md](/workspaces/gitreal/docs/development-memo.md).
