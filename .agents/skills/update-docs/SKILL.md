@@ -14,7 +14,7 @@ Read the smallest set of files that define behavior:
 1. entry points and changed source files
 2. build and dependency manifests
 3. CI workflows
-4. `README.md`, `docs/`, `AGENT.md`
+4. `README.md`, `docs/`, `AGENTS.md`
 5. `docs/development-memo.md` when present
 
 Do not update docs from memory. Derive every command and path from the repository.
@@ -25,7 +25,7 @@ Use this split:
 
 - `README.md`: how to install, run, configure, and use the project
 - `docs/`: design rationale, ADRs, requirements, internal notes
-- `AGENT.md`: repo-specific instructions for Codex
+- `AGENTS.md`: repo-specific instructions for Codex
 
 For GitReal specifically, keep `README.md` and `docs/development-memo.md` aligned on:
 
