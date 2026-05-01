@@ -5,13 +5,18 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  id-token: write # required for cosign keyless signing via OIDC
+# Deny by default at the workflow level. Each job opts into the smallest scope
+# it needs (read for source, write only for the publish job that mints a
+# release and signs blobs via OIDC).
+permissions: {}
 
 jobs:
   build-release:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
     strategy:
       fail-fast: false
       matrix:
@@ -38,13 +43,17 @@ jobs:
             binary_name: git-real.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+          # Disable Go module/build cache: a poisoned cache shared across
+          # workflows could otherwise influence the binaries we ship.
+          cache: false
 
       - run: go mod download
 
@@ -84,7 +93,7 @@ jobs:
               -czf "dist/${archive_name}" "${artifact_name}"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.*
@@ -94,8 +103,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-release
 
+    permissions:
+      contents: write # required to create the GitHub Release
+      id-token: write # required for cosign keyless signing via OIDC
+
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: release-*
@@ -106,7 +119,7 @@ jobs:
           set -euo pipefail
           (cd dist && sha256sum git-real_*.tar.gz git-real_*.zip > SHA256SUMS)
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: Sign checksums with cosign (keyless OIDC)
         env:
@@ -119,11 +132,19 @@ jobs:
             --output-certificate dist/SHA256SUMS.pem \
             dist/SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/git-real_*.tar.gz
-            dist/git-real_*.zip
-            dist/SHA256SUMS
-            dist/SHA256SUMS.sig
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" \
+            --verify-tag \
+            --title "${TAG}" \
+            --generate-notes \
+            dist/git-real_*.tar.gz \
+            dist/git-real_*.zip \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sig \
             dist/SHA256SUMS.pem
