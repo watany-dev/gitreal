@@ -317,6 +317,33 @@ func TestStatusWithoutUpstream(t *testing.T) {
 	}
 }
 
+func TestInitIsIdempotentAndResetsMode(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:        "/tmp/repo",
+		configBools: map[string]bool{"gitreal.enabled": true, "gitreal.armed": true},
+		configInts:  map[string]int{"gitreal.graceSeconds": 30},
+	}
+	app, _, _, _, _ := newTestApp(repo)
+
+	if got := app.run([]string{"init"}); got != 0 {
+		t.Fatalf("first init exit code = %d, want 0", got)
+	}
+	if got := app.run([]string{"init"}); got != 0 {
+		t.Fatalf("second init exit code = %d, want 0", got)
+	}
+	if !repo.configBools["gitreal.enabled"] {
+		t.Fatalf("enabled config = false, want true")
+	}
+	if repo.configBools["gitreal.armed"] {
+		t.Fatalf("armed config = true, want false")
+	}
+	if repo.configInts["gitreal.graceSeconds"] != 120 {
+		t.Fatalf("graceSeconds = %d, want 120", repo.configInts["gitreal.graceSeconds"])
+	}
+}
+
 func TestResolveGraceSeconds(t *testing.T) {
 	t.Parallel()
 
@@ -348,7 +375,7 @@ func TestCommandOnceViaRun(t *testing.T) {
 
 	repo := &fakeRepo{
 		root:          "/tmp/repo",
-		configBools:   map[string]bool{"gitreal.armed": false},
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
 		configInts:    map[string]int{"gitreal.graceSeconds": 15},
 		currentBranch: "main",
 		upstream:      "origin/main",
@@ -369,7 +396,7 @@ func TestCommandParseFailures(t *testing.T) {
 
 	repo := &fakeRepo{
 		root:          "/tmp/repo",
-		configBools:   map[string]bool{"gitreal.armed": false},
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
 		configInts:    map[string]int{"gitreal.graceSeconds": 15},
 		currentBranch: "main",
 		upstream:      "origin/main",
@@ -458,6 +485,29 @@ func TestRunChallengePushConfirmed(t *testing.T) {
 	}
 	if len(*notifications) != 2 || !strings.Contains((*notifications)[1], "Push confirmed") {
 		t.Fatalf("notifications = %v, want push confirmed", *notifications)
+	}
+}
+
+func TestRunChallengePreflightFetchFailureContinues(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{1, 0},
+		fetchErrors:   []error{errors.New("fetch failed")},
+	}
+	app, stdout, _, _, _ := newTestApp(repo)
+
+	if err := app.runChallenge(repo, 30, false); err != nil {
+		t.Fatalf("runChallenge() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "preflight fetch failed; continuing with last known upstream state: fetch failed") {
+		t.Fatalf("stdout = %q, want preflight fetch warning", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "push confirmed") {
+		t.Fatalf("stdout = %q, want push confirmed", stdout.String())
 	}
 }
 
@@ -621,6 +671,9 @@ func TestRescueCommands(t *testing.T) {
 	if len(repo.resetCalls) != 1 || repo.resetCalls[0] != "refs/gitreal/backups/main/1" {
 		t.Fatalf("resetCalls = %v, want restore ref", repo.resetCalls)
 	}
+	if !strings.Contains(stdout.String(), "Current branch reset to backup ref: refs/gitreal/backups/main/1") {
+		t.Fatalf("stdout = %q, want restore success message", stdout.String())
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -667,7 +720,7 @@ func TestCommandStartSingleIteration(t *testing.T) {
 
 	repo := &fakeRepo{
 		root:          "/tmp/repo",
-		configBools:   map[string]bool{"gitreal.armed": false},
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
 		configInts:    map[string]int{"gitreal.graceSeconds": 45},
 		currentBranch: "main",
 		upstream:      "origin/main",
@@ -689,7 +742,7 @@ func TestCommandStartHandlesChallengeError(t *testing.T) {
 
 	repo := &fakeRepo{
 		root:             "/tmp/repo",
-		configBools:      map[string]bool{"gitreal.armed": false},
+		configBools:      map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
 		configInts:       map[string]int{"gitreal.graceSeconds": 45},
 		currentBranchErr: errors.New("detached"),
 	}
@@ -755,6 +808,68 @@ func TestCommandFailures(t *testing.T) {
 	}
 }
 
+func TestCommandsRequireInitialization(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "once", args: []string{"once"}},
+		{name: "start", args: []string{"start"}},
+		{name: "arm", args: []string{"arm"}},
+		{name: "disarm", args: []string{"disarm"}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := &fakeRepo{
+				root:        "/tmp/repo",
+				configBools: map[string]bool{"gitreal.enabled": false, "gitreal.armed": false},
+			}
+			app, _, stderr, _, _ := newTestApp(repo)
+
+			if got := app.run(tc.args); got != 1 {
+				t.Fatalf("run(%v) = %d, want 1", tc.args, got)
+			}
+			if !strings.Contains(stderr.String(), "repository is not initialized for GitReal; run: git real init") {
+				t.Fatalf("stderr = %q, want initialization guidance", stderr.String())
+			}
+		})
+	}
+}
+
+func TestStatusAndRescueWorkWithoutInitialization(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		configBools:   map[string]bool{"gitreal.enabled": false, "gitreal.armed": false},
+		configInts:    map[string]int{"gitreal.graceSeconds": 120},
+		currentBranch: "main",
+		upstreamErr:   errors.New("missing"),
+		rescueRefs:    []string{"refs/gitreal/backups/main/1"},
+	}
+	app, stdout, stderr, _, _ := newTestApp(repo)
+
+	if got := app.run([]string{"status"}); got != 0 {
+		t.Fatalf("status exit code = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "enabled: false") {
+		t.Fatalf("stdout = %q, want disabled status", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if got := app.run([]string{"rescue", "list"}); got != 0 {
+		t.Fatalf("rescue list exit code = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "refs/gitreal/backups/main/1") {
+		t.Fatalf("stdout = %q, want rescue refs", stdout.String())
+	}
+}
+
 func TestConfigWriteFailures(t *testing.T) {
 	t.Parallel()
 
@@ -776,7 +891,10 @@ func TestConfigWriteFailures(t *testing.T) {
 		t.Fatalf("stderr = %q, want config error", stderr.String())
 	}
 
-	repo = &fakeRepo{setBoolErr: errors.New("boom")}
+	repo = &fakeRepo{
+		configBools: map[string]bool{"gitreal.enabled": true},
+		setBoolErr:  errors.New("boom"),
+	}
 	app, _, stderr, _, _ = newTestApp(repo)
 	if got := app.run([]string{"arm"}); got != 1 {
 		t.Fatalf("arm exit code = %d, want 1", got)

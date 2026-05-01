@@ -55,7 +55,7 @@ git-real/
 
 ```bash
 # インストール
-brew install your/tap/git-real
+go install github.com/watany-dev/gitreal/cmd/git-real@latest
 
 # 対象 repo で初期化
 git real init
@@ -76,6 +76,8 @@ git real rescue list
 git real rescue restore <backup-ref>
 ```
 
+`git real once`、`git real start`、`git real arm`、`git real disarm` は `git real init` 後にのみ動かす。未初期化でも `git real status` と `git real rescue ...` は使える。
+
 ## 設定方針
 
 設定は Git config に入れる。
@@ -93,7 +95,7 @@ git config --local gitreal.graceSeconds 120
 Hook だけで作るのは不向き。Git hooks は `commit`、`push`、`merge` など Git 実行タイミングに反応する仕組みであり、ランダム時刻に通知する scheduler ではない。
 
 - `git real once`: その場でチャレンジを 1 回実行
-- `git real start`: フォアグラウンドで常駐し、毎時ランダムな時刻に通知
+- `git real start`: Public Beta 時点の常駐入口。フォアグラウンドで常駐し、毎時ランダムな時刻に通知
 - `git real daemon`: `launchd` / `systemd` / Windows Task Scheduler から起動される本番用
 - `git real init`: repo local config に `gitreal.enabled=true` を書く
 - `git real arm`: `gitreal.armed=true` を書く
@@ -140,6 +142,12 @@ git real rescue restore <ref>
 ```
 
 危険モードは必ず `git real arm` を明示的に要求する。デフォルトは dry-run。
+
+## Public Beta 配布方針
+
+- 正式なベータ導線は `go install` と GitHub Releases に絞る
+- Release artifact は macOS / Linux / Windows 向けに出す
+- `git real daemon` と Homebrew tap は次フェーズの課題として残す
 
 ## 初期プロトタイプ
 

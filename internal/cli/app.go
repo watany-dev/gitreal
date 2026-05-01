@@ -157,6 +157,10 @@ func (a *app) commandOnce(args []string) int {
 		return 2
 	}
 
+	if err := a.requireInitialized(repo); err != nil {
+		return a.fail(err)
+	}
+
 	if err := a.runChallenge(repo, graceSeconds, repo.ConfigBool("gitreal.armed", false)); err != nil {
 		return a.fail(err)
 	}
@@ -173,6 +177,10 @@ func (a *app) commandStart(args []string) int {
 	graceSeconds, err := resolveGraceSeconds(args, repo, a.stderr)
 	if err != nil {
 		return 2
+	}
+
+	if err := a.requireInitialized(repo); err != nil {
+		return a.fail(err)
 	}
 
 	return a.runStart(repo, graceSeconds, a.startIterations)
@@ -205,6 +213,10 @@ func (a *app) commandArm() int {
 		return a.fail(err)
 	}
 
+	if err := a.requireInitialized(repo); err != nil {
+		return a.fail(err)
+	}
+
 	if err := repo.SetConfigBool("gitreal.armed", true); err != nil {
 		return a.fail(err)
 	}
@@ -216,6 +228,10 @@ func (a *app) commandArm() int {
 func (a *app) commandDisarm() int {
 	repo, err := a.discoverRepo(".")
 	if err != nil {
+		return a.fail(err)
+	}
+
+	if err := a.requireInitialized(repo); err != nil {
 		return a.fail(err)
 	}
 
@@ -273,7 +289,7 @@ func (a *app) commandRescue(args []string) int {
 			return a.fail(err)
 		}
 
-		fmt.Fprintf(a.stdout, "Restored: %s\n", backupRef)
+		fmt.Fprintf(a.stdout, "Current branch reset to backup ref: %s\n", backupRef)
 		return 0
 	default:
 		fmt.Fprintf(a.stderr, "git-real rescue: unknown subcommand: %s\n", args[0])
@@ -292,7 +308,9 @@ func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error 
 		return err
 	}
 
-	_ = repo.FetchQuiet()
+	if err := repo.FetchQuiet(); err != nil {
+		fmt.Fprintf(a.stdout, "preflight fetch failed; continuing with last known upstream state: %v\n", err)
+	}
 
 	ahead, err := repo.AheadCount()
 	if err != nil {
@@ -446,4 +464,12 @@ Usage:
 func (a *app) fail(err error) int {
 	fmt.Fprintf(a.stderr, "git-real: %v\n", err)
 	return 1
+}
+
+func (a *app) requireInitialized(repo repository) error {
+	if repo.ConfigBool("gitreal.enabled", false) {
+		return nil
+	}
+
+	return fmt.Errorf("repository is not initialized for GitReal; run: git real init")
 }

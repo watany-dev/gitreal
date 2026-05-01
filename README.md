@@ -27,6 +27,27 @@ git real rescue list
 git real rescue restore <ref>
 ```
 
+## Quick Start
+
+```bash
+# install with go install
+go install github.com/watany-dev/gitreal/cmd/git-real@latest
+
+# initialize the current repository
+git real init
+
+# inspect current state
+git real status
+
+# run one dry-run challenge now
+git real once
+
+# run the foreground scheduler
+git real start
+```
+
+`git real once`, `git real start`, `git real arm`, and `git real disarm` require `git real init` first. `git real status` and `git real rescue ...` remain available before initialization.
+
 ## Safety Model
 
 - Default mode is dry-run.
@@ -42,8 +63,8 @@ git real rescue restore <ref>
 - Repository config: `gitreal.enabled`, `gitreal.armed`, `gitreal.graceSeconds`
 - Scheduler model:
   - `git real once` runs one challenge immediately
-  - `git real start` runs in the foreground with hourly random timing
-  - `git real daemon` is the future background/service entrypoint
+  - `git real start` is the current foreground scheduler entrypoint with hourly random timing
+  - `git real daemon` remains a future background/service entrypoint and is not part of the current beta
 
 Current package layout:
 
@@ -82,18 +103,24 @@ Property-based tests are included with the standard library `testing/quick`.
 
 ## Expected Install Paths
 
-Initial distribution targets:
+Current beta distribution targets:
 
-- GitHub Releases with per-OS archives
-- Homebrew tap
+- GitHub Releases with per-OS archives for macOS, Linux, and Windows
 - `go install`
 
 Example commands:
 
 ```bash
-brew install yourname/tap/git-real
-go install github.com/yourname/git-real/cmd/git-real@latest
+go install github.com/watany-dev/gitreal/cmd/git-real@latest
 ```
+
+Release archives are published as:
+
+- `git-real_darwin_amd64.tar.gz`
+- `git-real_darwin_arm64.tar.gz`
+- `git-real_linux_amd64.tar.gz`
+- `git-real_linux_arm64.tar.gz`
+- `git-real_windows_amd64.zip`
 
 ## Notes
 
