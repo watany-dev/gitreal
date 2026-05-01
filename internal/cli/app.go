@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -12,14 +13,28 @@ import (
 	"github.com/watany-dev/gitreal/internal/challenge"
 	ggit "github.com/watany-dev/gitreal/internal/git"
 	"github.com/watany-dev/gitreal/internal/notify"
+	"github.com/watany-dev/gitreal/internal/schedule"
+)
+
+const (
+	scheduleModeHourly   = "hourly"
+	scheduleModeDaily    = "daily"
+	scheduleModeInterval = "interval"
+
+	defaultDailyWindowStart = "09:00"
+	defaultDailyWindowEnd   = "22:00"
+	defaultIntervalMinutes  = 60
+	defaultLinuxSoundFile   = "/usr/share/sounds/freedesktop/stereo/message.oga"
 )
 
 type repository interface {
 	Root() string
 	SetConfigBool(key string, value bool) error
 	SetConfigInt(key string, value int) error
+	SetConfigString(key, value string) error
 	ConfigBool(key string, fallback bool) bool
 	ConfigInt(key string, fallback int) int
+	ConfigString(key, fallback string) string
 	CurrentBranch() (string, error)
 	Upstream() (string, error)
 	FetchQuiet() error
@@ -36,6 +51,7 @@ type app struct {
 	now              func() time.Time
 	sleep            func(time.Duration)
 	sendNotification func(title, message string) error
+	playSound        func(name string, args ...string) error
 	rng              *rand.Rand
 	stdout           io.Writer
 	stderr           io.Writer
@@ -54,9 +70,12 @@ func newApp(stdout, stderr io.Writer) *app {
 		now:              time.Now,
 		sleep:            time.Sleep,
 		sendNotification: notify.Send,
-		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
-		stdout:           stdout,
-		stderr:           stderr,
+		playSound: func(name string, args ...string) error {
+			return exec.Command(name, args...).Start()
+		},
+		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		stdout: stdout,
+		stderr: stderr,
 	}
 }
 
@@ -109,8 +128,17 @@ func (a *app) commandInit() int {
 		return a.fail(err)
 	}
 
+	if err := repo.SetConfigString("gitreal.scheduleMode", scheduleModeHourly); err != nil {
+		return a.fail(err)
+	}
+
+	if err := repo.SetConfigBool("gitreal.sound", true); err != nil {
+		return a.fail(err)
+	}
+
 	fmt.Fprintf(a.stdout, "GitReal initialized for: %s\n", repo.Root())
 	fmt.Fprintln(a.stdout, "Mode: dry-run")
+	fmt.Fprintf(a.stdout, "Schedule: %s\n", scheduleModeHourly)
 	fmt.Fprintln(a.stdout, "Run: git real once")
 	return 0
 }
@@ -140,9 +168,14 @@ func (a *app) commandStatus() int {
 	fmt.Fprintf(a.stdout, "enabled: %t\n", repo.ConfigBool("gitreal.enabled", false))
 	fmt.Fprintf(a.stdout, "armed: %t\n", repo.ConfigBool("gitreal.armed", false))
 	fmt.Fprintf(a.stdout, "grace-seconds: %d\n", challenge.NormalizeGraceSeconds(repo.ConfigInt("gitreal.graceSeconds", challenge.DefaultGraceSeconds)))
+	fmt.Fprintf(a.stdout, "schedule: %s\n", describeSchedule(repo))
+	fmt.Fprintf(a.stdout, "sound: %t\n", repo.ConfigBool("gitreal.sound", true))
 	fmt.Fprintf(a.stdout, "branch: %s\n", branch)
 	fmt.Fprintf(a.stdout, "upstream: %s\n", upstream)
 	fmt.Fprintf(a.stdout, "ahead: %s\n", aheadText)
+	if repo.ConfigString("gitreal.scheduleMode", scheduleModeHourly) == scheduleModeDaily {
+		fmt.Fprintln(a.stdout, "note: daily mode may re-fire same day after process restart (known limitation)")
+	}
 	return 0
 }
 
@@ -188,11 +221,12 @@ func (a *app) commandStart(args []string) int {
 
 func (a *app) runStart(repo repository, graceSeconds int, iterations int) int {
 	base := a.now()
+	sched := resolveSchedule(repo, a.stderr)
 	fmt.Fprintf(a.stdout, "GitReal started for %s\n", repo.Root())
 
 	completed := 0
 	for iterations <= 0 || completed < iterations {
-		next := nextRandomSlot(base, a.rng)
+		next := sched.Next(base, a.rng)
 		fmt.Fprintf(a.stdout, "next challenge: %s\n", next.Format(time.RFC3339))
 		a.sleepUntil(next)
 
@@ -200,7 +234,7 @@ func (a *app) runStart(repo repository, graceSeconds int, iterations int) int {
 			fmt.Fprintf(a.stderr, "git-real: %v\n", err)
 		}
 
-		base = next.Add(time.Hour)
+		base = next.Add(time.Second)
 		completed++
 	}
 
@@ -350,19 +384,19 @@ func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error 
 	fmt.Fprintf(a.stdout, "ahead: %d\n", ahead)
 
 	if ahead == 0 {
-		a.notify("GitReal", "No unpushed commits. Nothing to do.")
+		a.notify(repo, "GitReal", "No unpushed commits. Nothing to do.")
 		fmt.Fprintln(a.stdout, "nothing to do: no unpushed commits")
 		return nil
 	}
 
 	deadline := a.now().Add(time.Duration(graceSeconds) * time.Second)
 	fmt.Fprintf(a.stdout, "deadline: %s\n", deadline.Format(time.RFC3339))
-	a.notify("GitReal", fmt.Sprintf("%s has %d unpushed commit(s). Push before %s.", branch, ahead, deadline.Format("15:04:05")))
+	a.notify(repo, "GitReal", fmt.Sprintf("%s has %d unpushed commit(s). Push before %s.", branch, ahead, deadline.Format("15:04:05")))
 
-	a.sleepUntil(deadline)
+	a.sleepWithReminders(repo, deadline, branch)
 
 	if err := repo.FetchQuiet(); err != nil {
-		a.notify("GitReal", "fetch failed; punishment skipped for safety.")
+		a.notify(repo, "GitReal", "fetch failed; punishment skipped for safety.")
 		fmt.Fprintln(a.stdout, "fetch failed after deadline; punishment skipped for safety")
 		return nil
 	}
@@ -373,13 +407,13 @@ func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error 
 	}
 
 	if aheadAfter == 0 {
-		a.notify("GitReal", "Push confirmed. You are GitReal.")
+		a.notify(repo, "GitReal", "Push confirmed. You are GitReal.")
 		fmt.Fprintln(a.stdout, "push confirmed")
 		return nil
 	}
 
 	if !armed {
-		a.notify("GitReal dry-run", fmt.Sprintf("%d commit(s) would be reset.", aheadAfter))
+		a.notify(repo, "GitReal dry-run", fmt.Sprintf("%d commit(s) would be reset.", aheadAfter))
 		fmt.Fprintf(a.stdout, "dry-run: would reset %d commit(s) to @{u}\n", aheadAfter)
 		return nil
 	}
@@ -405,16 +439,34 @@ func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error 
 		}
 	}
 
-	a.notify("GitReal", fmt.Sprintf("Local commits made unreal. Backup: %s", backupRef))
+	a.notify(repo, "GitReal", fmt.Sprintf("Local commits made unreal. Backup: %s", backupRef))
 	fmt.Fprintf(a.stdout, "backup ref: %s\n", backupRef)
 	fmt.Fprintf(a.stdout, "restore: git real rescue restore %s\n", backupRef)
 	return nil
 }
 
-func (a *app) notify(title, message string) {
+func (a *app) notify(repo repository, title, message string) {
 	if err := a.sendNotification(title, message); err != nil {
 		fmt.Fprintf(a.stdout, "notification: %s: %s\n", title, message)
 	}
+	a.alertSound(repo)
+}
+
+func (a *app) alertSound(repo repository) {
+	if repo == nil || !repo.ConfigBool("gitreal.sound", true) {
+		return
+	}
+
+	fmt.Fprint(a.stderr, "\a")
+
+	if a.playSound == nil {
+		return
+	}
+
+	if err := a.playSound("paplay", defaultLinuxSoundFile); err == nil {
+		return
+	}
+	_ = a.playSound("canberra-gtk-play", "-i", "message")
 }
 
 func (a *app) sleepUntil(target time.Time) {
@@ -422,6 +474,24 @@ func (a *app) sleepUntil(target time.Time) {
 	if duration > 0 {
 		a.sleep(duration)
 	}
+}
+
+func (a *app) sleepWithReminders(repo repository, deadline time.Time, branch string) {
+	for _, r := range []struct {
+		offset  time.Duration
+		message string
+	}{
+		{30 * time.Second, fmt.Sprintf("30s left to push %s", branch)},
+		{10 * time.Second, fmt.Sprintf("10s left! push %s now.", branch)},
+	} {
+		fireAt := deadline.Add(-r.offset)
+		if !fireAt.After(a.now()) {
+			continue
+		}
+		a.sleepUntil(fireAt)
+		a.notify(repo, "GitReal", r.message)
+	}
+	a.sleepUntil(deadline)
 }
 
 func resolveGraceSeconds(args []string, repo repository, stderr io.Writer) (int, error) {
@@ -463,15 +533,48 @@ func parseGraceSeconds(args []string, stderr io.Writer) (int, bool, error) {
 	return challenge.NormalizeGraceSeconds(*graceSeconds), explicit, nil
 }
 
-func nextRandomSlot(base time.Time, rng *rand.Rand) time.Time {
-	windowStart := base.Truncate(time.Hour)
-	offset := time.Duration(rng.Intn(3600)) * time.Second
-	slot := windowStart.Add(offset)
-	if !slot.After(base) {
-		slot = windowStart.Add(time.Hour + time.Duration(rng.Intn(3600))*time.Second)
+func resolveSchedule(repo repository, stderr io.Writer) schedule.Schedule {
+	mode := repo.ConfigString("gitreal.scheduleMode", scheduleModeHourly)
+	switch mode {
+	case scheduleModeDaily:
+		startStr := repo.ConfigString("gitreal.dailyWindowStart", defaultDailyWindowStart)
+		endStr := repo.ConfigString("gitreal.dailyWindowEnd", defaultDailyWindowEnd)
+		start, errStart := schedule.ParseClock(startStr)
+		end, errEnd := schedule.ParseClock(endStr)
+		if errStart != nil || errEnd != nil || end <= start {
+			fmt.Fprintf(stderr, "git-real: invalid daily window %q-%q; falling back to hourly\n", startStr, endStr)
+			return schedule.HourlySchedule{}
+		}
+		return schedule.DailySchedule{Start: start, End: end}
+	case scheduleModeInterval:
+		minutes := repo.ConfigInt("gitreal.intervalMinutes", defaultIntervalMinutes)
+		if minutes <= 0 {
+			fmt.Fprintf(stderr, "git-real: invalid intervalMinutes %d; falling back to hourly\n", minutes)
+			return schedule.HourlySchedule{}
+		}
+		return schedule.IntervalSchedule{Interval: time.Duration(minutes) * time.Minute}
+	case scheduleModeHourly, "":
+		return schedule.HourlySchedule{}
+	default:
+		fmt.Fprintf(stderr, "git-real: unknown scheduleMode %q; falling back to hourly\n", mode)
+		return schedule.HourlySchedule{}
 	}
+}
 
-	return slot
+func describeSchedule(repo repository) string {
+	mode := repo.ConfigString("gitreal.scheduleMode", scheduleModeHourly)
+	switch mode {
+	case scheduleModeDaily:
+		return fmt.Sprintf("daily %s-%s",
+			repo.ConfigString("gitreal.dailyWindowStart", defaultDailyWindowStart),
+			repo.ConfigString("gitreal.dailyWindowEnd", defaultDailyWindowEnd))
+	case scheduleModeInterval:
+		return fmt.Sprintf("interval %dm", repo.ConfigInt("gitreal.intervalMinutes", defaultIntervalMinutes))
+	case "":
+		return scheduleModeHourly
+	default:
+		return mode
+	}
 }
 
 func printHelp(w io.Writer) {

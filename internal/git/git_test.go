@@ -162,6 +162,35 @@ func TestSetConfig(t *testing.T) {
 	}
 }
 
+func TestConfigString(t *testing.T) {
+	t.Parallel()
+
+	repo := &Repository{
+		root: "/tmp/repo",
+		runner: &fakeRunner{
+			responses: map[string]fakeResponse{
+				"/tmp/repo|config\x00--get\x00gitreal.scheduleMode": {
+					output: "daily\n",
+				},
+				"/tmp/repo|config\x00--get\x00gitreal.missing": {
+					err: errors.New("missing"),
+				},
+				"/tmp/repo|config\x00--local\x00gitreal.scheduleMode\x00hourly": {},
+			},
+		},
+	}
+
+	if got := repo.ConfigString("gitreal.scheduleMode", "hourly"); got != "daily" {
+		t.Fatalf("ConfigString(scheduleMode) = %q, want daily", got)
+	}
+	if got := repo.ConfigString("gitreal.missing", "fallback"); got != "fallback" {
+		t.Fatalf("ConfigString(missing) = %q, want fallback", got)
+	}
+	if err := repo.SetConfigString("gitreal.scheduleMode", "hourly"); err != nil {
+		t.Fatalf("SetConfigString error = %v", err)
+	}
+}
+
 func TestBranchAndUpstream(t *testing.T) {
 	t.Parallel()
 

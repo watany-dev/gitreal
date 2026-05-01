@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ type fakeRepo struct {
 	root             string
 	configBools      map[string]bool
 	configInts       map[string]int
+	configStrings    map[string]string
 	currentBranch    string
 	currentBranchErr error
 	upstream         string
@@ -30,13 +32,15 @@ type fakeRepo struct {
 	resetErr         error
 	setBoolErr       error
 	setIntErr        error
+	setStringErr     error
 
-	setBoolCalls  map[string]bool
-	setIntCalls   map[string]int
-	backupCalls   []string
-	resetCalls    []string
-	fetchCalls    int
-	stashMessages []string
+	setBoolCalls   map[string]bool
+	setIntCalls    map[string]int
+	setStringCalls map[string]string
+	backupCalls    []string
+	resetCalls     []string
+	fetchCalls     int
+	stashMessages  []string
 }
 
 func (f *fakeRepo) Root() string { return f.root }
@@ -80,6 +84,28 @@ func (f *fakeRepo) ConfigBool(key string, fallback bool) bool {
 
 func (f *fakeRepo) ConfigInt(key string, fallback int) int {
 	if value, ok := f.configInts[key]; ok {
+		return value
+	}
+	return fallback
+}
+
+func (f *fakeRepo) SetConfigString(key, value string) error {
+	if f.setStringErr != nil {
+		return f.setStringErr
+	}
+	if f.setStringCalls == nil {
+		f.setStringCalls = map[string]string{}
+	}
+	f.setStringCalls[key] = value
+	if f.configStrings == nil {
+		f.configStrings = map[string]string{}
+	}
+	f.configStrings[key] = value
+	return nil
+}
+
+func (f *fakeRepo) ConfigString(key, fallback string) string {
+	if value, ok := f.configStrings[key]; ok {
 		return value
 	}
 	return fallback
@@ -187,9 +213,10 @@ func newTestApp(repo repository) (*app, *bytes.Buffer, *bytes.Buffer, *fakeClock
 			notifications = append(notifications, title+": "+message)
 			return nil
 		},
-		rng:    rand.New(rand.NewSource(1)),
-		stdout: stdout,
-		stderr: stderr,
+		playSound: func(name string, args ...string) error { return nil },
+		rng:       rand.New(rand.NewSource(1)),
+		stdout:    stdout,
+		stderr:    stderr,
 	}
 
 	return testApp, stdout, stderr, clock, &notifications
@@ -463,8 +490,12 @@ func TestRunChallengeDryRun(t *testing.T) {
 	if clock.current != time.Date(2026, 5, 1, 12, 2, 0, 0, time.UTC) {
 		t.Fatalf("clock.current = %s, want 2 minutes later", clock.current)
 	}
-	if len(*notifications) != 2 {
-		t.Fatalf("notifications = %v, want 2 notifications", *notifications)
+	wantSubstrings := []string{"unpushed commit(s)", "30s left", "10s left", "dry-run"}
+	joined := strings.Join(*notifications, "\n")
+	for _, want := range wantSubstrings {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("notifications = %v, want %q present", *notifications, want)
+		}
 	}
 }
 
@@ -485,8 +516,9 @@ func TestRunChallengePushConfirmed(t *testing.T) {
 	if !strings.Contains(stdout.String(), "push confirmed") {
 		t.Fatalf("stdout = %q, want push confirmed", stdout.String())
 	}
-	if len(*notifications) != 2 || !strings.Contains((*notifications)[1], "Push confirmed") {
-		t.Fatalf("notifications = %v, want push confirmed", *notifications)
+	last := (*notifications)[len(*notifications)-1]
+	if !strings.Contains(last, "Push confirmed") {
+		t.Fatalf("last notification = %q, want push confirmed", last)
 	}
 }
 
@@ -561,8 +593,9 @@ func TestRunChallengeArmed(t *testing.T) {
 	if !strings.Contains(stdout.String(), "restore: git real rescue restore "+repo.backupRef) {
 		t.Fatalf("stdout = %q, want restore message", stdout.String())
 	}
-	if len(*notifications) != 2 || !strings.Contains((*notifications)[1], "Local commits made unreal") {
-		t.Fatalf("notifications = %v, want punishment message", *notifications)
+	last := (*notifications)[len(*notifications)-1]
+	if !strings.Contains(last, "Local commits made unreal") {
+		t.Fatalf("last notification = %q, want punishment message", last)
 	}
 }
 
@@ -642,9 +675,195 @@ func TestNotifyFallback(t *testing.T) {
 		return errors.New("unsupported")
 	}
 
-	app.notify("GitReal", "hello")
+	app.notify(repo, "GitReal", "hello")
 	if !strings.Contains(stdout.String(), "notification: GitReal: hello") {
 		t.Fatalf("stdout = %q, want notification fallback", stdout.String())
+	}
+}
+
+func TestNotifyWritesBel(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{configBools: map[string]bool{"gitreal.sound": true}}
+	app, _, stderr, _, _ := newTestApp(repo)
+
+	app.notify(repo, "GitReal", "hello")
+	if !bytes.Contains(stderr.Bytes(), []byte{0x07}) {
+		t.Fatalf("stderr = %q, want BEL byte", stderr.String())
+	}
+
+	stderr.Reset()
+	app.sendNotification = func(title, message string) error { return errors.New("boom") }
+	app.notify(repo, "GitReal", "hello")
+	if !bytes.Contains(stderr.Bytes(), []byte{0x07}) {
+		t.Fatalf("stderr after failure = %q, want BEL byte", stderr.String())
+	}
+}
+
+func TestNotifyRespectsSoundConfig(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{configBools: map[string]bool{"gitreal.sound": false}}
+	app, _, stderr, _, _ := newTestApp(repo)
+
+	soundCalls := 0
+	app.playSound = func(name string, args ...string) error {
+		soundCalls++
+		return nil
+	}
+
+	app.notify(repo, "GitReal", "hello")
+	if bytes.Contains(stderr.Bytes(), []byte{0x07}) {
+		t.Fatalf("stderr = %q, want no BEL when sound=false", stderr.String())
+	}
+	if soundCalls != 0 {
+		t.Fatalf("playSound calls = %d, want 0 when sound=false", soundCalls)
+	}
+}
+
+func TestAlertSoundFallsBackToCanberra(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{configBools: map[string]bool{"gitreal.sound": true}}
+	app, _, _, _, _ := newTestApp(repo)
+
+	calls := []string{}
+	app.playSound = func(name string, args ...string) error {
+		calls = append(calls, name)
+		if name == "paplay" {
+			return errors.New("not installed")
+		}
+		return nil
+	}
+
+	app.alertSound(repo)
+	if len(calls) != 2 || calls[0] != "paplay" || calls[1] != "canberra-gtk-play" {
+		t.Fatalf("calls = %v, want [paplay canberra-gtk-play]", calls)
+	}
+}
+
+func TestSleepWithReminders(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name           string
+		graceSeconds   int
+		wantReminders  int
+		wantSubstrings []string
+	}{
+		{name: "long window emits both", graceSeconds: 120, wantReminders: 2, wantSubstrings: []string{"30s left", "10s left"}},
+		{name: "20s window emits only T-10", graceSeconds: 20, wantReminders: 1, wantSubstrings: []string{"10s left"}},
+		{name: "short window emits none", graceSeconds: 5, wantReminders: 0, wantSubstrings: nil},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := &fakeRepo{configBools: map[string]bool{"gitreal.sound": false}}
+			app, _, _, clock, notifications := newTestApp(repo)
+
+			deadline := clock.current.Add(time.Duration(tc.graceSeconds) * time.Second)
+			app.sleepWithReminders(repo, deadline, "main")
+
+			if len(*notifications) != tc.wantReminders {
+				t.Fatalf("reminder count = %d, want %d (got %v)", len(*notifications), tc.wantReminders, *notifications)
+			}
+			joined := strings.Join(*notifications, "\n")
+			for _, want := range tc.wantSubstrings {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("notifications = %v, want %q", *notifications, want)
+				}
+			}
+			if clock.current != deadline {
+				t.Fatalf("clock = %s, want deadline %s", clock.current, deadline)
+			}
+		})
+	}
+}
+
+func TestResolveSchedule(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		strings map[string]string
+		ints    map[string]int
+		wantTyp string
+	}{
+		{name: "default hourly", strings: nil, wantTyp: "HourlySchedule"},
+		{name: "explicit hourly", strings: map[string]string{"gitreal.scheduleMode": "hourly"}, wantTyp: "HourlySchedule"},
+		{name: "valid daily", strings: map[string]string{"gitreal.scheduleMode": "daily", "gitreal.dailyWindowStart": "09:00", "gitreal.dailyWindowEnd": "22:00"}, wantTyp: "DailySchedule"},
+		{name: "invalid daily window falls back", strings: map[string]string{"gitreal.scheduleMode": "daily", "gitreal.dailyWindowStart": "bad", "gitreal.dailyWindowEnd": "22:00"}, wantTyp: "HourlySchedule"},
+		{name: "inverted daily window falls back", strings: map[string]string{"gitreal.scheduleMode": "daily", "gitreal.dailyWindowStart": "22:00", "gitreal.dailyWindowEnd": "09:00"}, wantTyp: "HourlySchedule"},
+		{name: "interval", strings: map[string]string{"gitreal.scheduleMode": "interval"}, ints: map[string]int{"gitreal.intervalMinutes": 30}, wantTyp: "IntervalSchedule"},
+		{name: "interval invalid", strings: map[string]string{"gitreal.scheduleMode": "interval"}, ints: map[string]int{"gitreal.intervalMinutes": 0}, wantTyp: "HourlySchedule"},
+		{name: "unknown mode", strings: map[string]string{"gitreal.scheduleMode": "wat"}, wantTyp: "HourlySchedule"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := &fakeRepo{configStrings: tc.strings, configInts: tc.ints}
+			stderr := new(bytes.Buffer)
+			got := resolveSchedule(repo, stderr)
+			gotName := fmt.Sprintf("%T", got)
+			if !strings.HasSuffix(gotName, tc.wantTyp) {
+				t.Fatalf("resolveSchedule = %s, want suffix %s", gotName, tc.wantTyp)
+			}
+		})
+	}
+}
+
+func TestCommandInitSetsScheduleDefaults(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:        "/tmp/repo",
+		configBools: map[string]bool{},
+		configInts:  map[string]int{},
+	}
+	app, stdout, _, _, _ := newTestApp(repo)
+
+	if got := app.run([]string{"init"}); got != 0 {
+		t.Fatalf("init exit code = %d, want 0", got)
+	}
+	if repo.configStrings["gitreal.scheduleMode"] != "hourly" {
+		t.Fatalf("scheduleMode = %q, want hourly", repo.configStrings["gitreal.scheduleMode"])
+	}
+	if !repo.configBools["gitreal.sound"] {
+		t.Fatalf("sound = false, want true")
+	}
+	if !strings.Contains(stdout.String(), "Schedule: hourly") {
+		t.Fatalf("stdout = %q, want Schedule line", stdout.String())
+	}
+}
+
+func TestStatusShowsScheduleAndKnownLimitation(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.sound": true},
+		configInts:    map[string]int{"gitreal.graceSeconds": 120},
+		configStrings: map[string]string{"gitreal.scheduleMode": "daily", "gitreal.dailyWindowStart": "09:00", "gitreal.dailyWindowEnd": "22:00"},
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{0},
+	}
+	app, stdout, _, _, _ := newTestApp(repo)
+
+	if got := app.run([]string{"status"}); got != 0 {
+		t.Fatalf("status exit code = %d, want 0", got)
+	}
+
+	for _, want := range []string{"schedule: daily 09:00-22:00", "sound: true", "known limitation"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want substring %q", stdout.String(), want)
+		}
 	}
 }
 
@@ -789,24 +1008,27 @@ func TestCommandStartHandlesChallengeError(t *testing.T) {
 	}
 }
 
-func TestNextRandomSlot(t *testing.T) {
+func TestRunStartUsesResolvedSchedule(t *testing.T) {
 	t.Parallel()
 
-	rng := rand.New(rand.NewSource(1))
-	base := time.Date(2026, 5, 1, 12, 15, 0, 0, time.UTC)
-	slot := nextRandomSlot(base, rng)
-
-	if !slot.After(base) {
-		t.Fatalf("nextRandomSlot() = %s, want after %s", slot, base)
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
+		configInts:    map[string]int{"gitreal.graceSeconds": 30},
+		configStrings: map[string]string{"gitreal.scheduleMode": "interval", "gitreal.intervalMinutes": ""},
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{0},
 	}
-	if slot.After(base.Add(2 * time.Hour)) {
-		t.Fatalf("nextRandomSlot() = %s, want within two hours", slot)
-	}
+	repo.configInts["gitreal.intervalMinutes"] = 5
+	app, stdout, _, _, _ := newTestApp(repo)
+	app.startIterations = 1
 
-	base = time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	slot = nextRandomSlot(base, rand.New(rand.NewSource(2)))
-	if !slot.After(base) {
-		t.Fatalf("nextRandomSlot() with hour boundary = %s, want after %s", slot, base)
+	if got := app.run([]string{"start"}); got != 0 {
+		t.Fatalf("start exit code = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "next challenge:") {
+		t.Fatalf("stdout = %q, want next challenge line", stdout.String())
 	}
 }
 
@@ -823,6 +1045,7 @@ func TestCommandFailures(t *testing.T) {
 		now:              time.Now,
 		sleep:            time.Sleep,
 		sendNotification: func(title, message string) error { return nil },
+		playSound:        func(name string, args ...string) error { return nil },
 		rng:              rand.New(rand.NewSource(1)),
 		stdout:           stdout,
 		stderr:           stderr,

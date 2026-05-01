@@ -128,6 +128,8 @@ GitReal stores settings in Git config:
 git config --local gitreal.enabled true
 git config --local gitreal.armed false
 git config --local gitreal.graceSeconds 120
+git config --local gitreal.scheduleMode hourly
+git config --local gitreal.sound true
 ```
 
 Current keys:
@@ -135,6 +137,20 @@ Current keys:
 - `gitreal.enabled`
 - `gitreal.armed`
 - `gitreal.graceSeconds`
+- `gitreal.scheduleMode` — `hourly` (default), `daily`, or `interval`
+- `gitreal.dailyWindowStart` / `gitreal.dailyWindowEnd` — `HH:MM` window for daily mode (defaults `09:00` / `22:00`)
+- `gitreal.intervalMinutes` — used when mode is `interval` (default `60`)
+- `gitreal.sound` — when `true`, GitReal also writes a terminal bell and plays a system sound on Linux
+
+### Schedule modes
+
+- `hourly`: one challenge per hour at a random second within the hour. This is the legacy behavior.
+- `daily`: one challenge per day at a random time within the configured window. **Known limitation: if `git real start` is interrupted and restarted on the same day, daily mode may fire again the same day.** This will be addressed in a future release.
+- `interval`: one challenge every `gitreal.intervalMinutes` minutes with random jitter so it does not feel mechanical.
+
+### Notification noticeability
+
+On Linux, GitReal sends `notify-send -u critical -t 0` so the alert stays on screen until you dismiss it. macOS notifications include a system sound (`Sosumi`) and Windows Toast notifications also play a console beep. During the 2-minute grace window GitReal sends additional reminders at 30 seconds and 10 seconds before the deadline so a missed first alert is less likely to cost you. When `gitreal.sound=true` (the default), each alert is also accompanied by a terminal bell on stderr and a best-effort `paplay` / `canberra-gtk-play` on Linux.
 
 ## Build From Source
 

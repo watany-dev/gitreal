@@ -10,14 +10,34 @@ func TestCommand(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name    string
-		goos    string
-		wantCmd string
-		wantOK  bool
+		name        string
+		goos        string
+		wantCmd     string
+		wantOK      bool
+		wantInArgs  []string
+		wantInJoint []string
 	}{
-		{name: "darwin", goos: "darwin", wantCmd: "osascript", wantOK: true},
-		{name: "linux", goos: "linux", wantCmd: "notify-send", wantOK: true},
-		{name: "windows", goos: "windows", wantCmd: "powershell", wantOK: true},
+		{
+			name:        "darwin",
+			goos:        "darwin",
+			wantCmd:     "osascript",
+			wantOK:      true,
+			wantInJoint: []string{`sound name "Sosumi"`},
+		},
+		{
+			name:       "linux",
+			goos:       "linux",
+			wantCmd:    "notify-send",
+			wantOK:     true,
+			wantInArgs: []string{"-u", "critical", "-t", "0", "-a", "git-real", "-i", "dialog-warning"},
+		},
+		{
+			name:        "windows",
+			goos:        "windows",
+			wantCmd:     "powershell",
+			wantOK:      true,
+			wantInJoint: []string{"[console]::beep(880,300)"},
+		},
 		{name: "unsupported", goos: "plan9", wantOK: false},
 	}
 
@@ -38,8 +58,30 @@ func TestCommand(t *testing.T) {
 			if tc.wantOK && len(gotArgs) == 0 {
 				t.Fatalf("command(%q) args = %v, want non-empty", tc.goos, gotArgs)
 			}
+
+			for _, want := range tc.wantInArgs {
+				if !containsArg(gotArgs, want) {
+					t.Fatalf("command(%q) args = %v, want %q present", tc.goos, gotArgs, want)
+				}
+			}
+
+			joined := strings.Join(gotArgs, " ")
+			for _, want := range tc.wantInJoint {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("command(%q) joined args = %q, want substring %q", tc.goos, joined, want)
+				}
+			}
 		})
 	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSend(t *testing.T) {
@@ -51,8 +93,11 @@ func TestSend(t *testing.T) {
 		if name != "notify-send" {
 			t.Fatalf("runner name = %q, want notify-send", name)
 		}
-		if len(args) != 2 {
-			t.Fatalf("runner args = %v, want 2 args", args)
+		if len(args) < 2 {
+			t.Fatalf("runner args = %v, want at least title+message", args)
+		}
+		if args[len(args)-2] != "GitReal" || args[len(args)-1] != "test" {
+			t.Fatalf("runner args tail = %v, want title=GitReal message=test", args[len(args)-2:])
 		}
 		return nil
 	})
