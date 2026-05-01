@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +15,10 @@ import (
 	ggit "github.com/watany-dev/gitreal/internal/git"
 	"github.com/watany-dev/gitreal/internal/notify"
 )
+
+// errInterrupted signals that the caller cancelled the run via SIGINT/SIGTERM.
+// It is treated as a graceful shutdown, not a failure.
+var errInterrupted = errors.New("interrupted")
 
 type repository interface {
 	Root() string
@@ -34,7 +40,7 @@ type repository interface {
 type app struct {
 	discoverRepo     func(path string) (repository, error)
 	now              func() time.Time
-	sleep            func(time.Duration)
+	sleep            func(ctx context.Context, d time.Duration) error
 	sendNotification func(title, message string) error
 	rng              *rand.Rand
 	stdout           io.Writer
@@ -42,8 +48,8 @@ type app struct {
 	startIterations  int
 }
 
-func Run(args []string, stdout, stderr io.Writer) int {
-	return newApp(stdout, stderr).run(args)
+func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return newApp(stdout, stderr).run(ctx, args)
 }
 
 func newApp(stdout, stderr io.Writer) *app {
@@ -52,7 +58,7 @@ func newApp(stdout, stderr io.Writer) *app {
 			return ggit.Discover(path)
 		},
 		now:              time.Now,
-		sleep:            time.Sleep,
+		sleep:            sleepWithContext,
 		sendNotification: notify.Send,
 		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 		stdout:           stdout,
@@ -60,7 +66,24 @@ func newApp(stdout, stderr io.Writer) *app {
 	}
 }
 
-func (a *app) run(args []string) int {
+// sleepWithContext blocks for the requested duration but unblocks immediately
+// when the context is cancelled (e.g. SIGINT). It returns context.Canceled or
+// context.DeadlineExceeded if the context fires first; otherwise nil.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (a *app) run(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		printHelp(a.stdout)
 		return 0
@@ -75,9 +98,9 @@ func (a *app) run(args []string) int {
 	case "status":
 		return a.commandStatus()
 	case "once":
-		return a.commandOnce(args[1:])
+		return a.commandOnce(ctx, args[1:])
 	case "start":
-		return a.commandStart(args[1:])
+		return a.commandStart(ctx, args[1:])
 	case "arm":
 		return a.commandArm()
 	case "disarm":
@@ -146,7 +169,7 @@ func (a *app) commandStatus() int {
 	return 0
 }
 
-func (a *app) commandOnce(args []string) int {
+func (a *app) commandOnce(ctx context.Context, args []string) int {
 	repo, err := a.discoverRepo(".")
 	if err != nil {
 		return a.fail(err)
@@ -161,14 +184,18 @@ func (a *app) commandOnce(args []string) int {
 		return a.fail(err)
 	}
 
-	if err := a.runChallenge(repo, graceSeconds, repo.ConfigBool("gitreal.armed", false)); err != nil {
+	if err := a.runChallenge(ctx, repo, graceSeconds, repo.ConfigBool("gitreal.armed", false)); err != nil {
+		if errors.Is(err, errInterrupted) {
+			fmt.Fprintln(a.stdout, "interrupted; no penalty applied")
+			return 0
+		}
 		return a.fail(err)
 	}
 
 	return 0
 }
 
-func (a *app) commandStart(args []string) int {
+func (a *app) commandStart(ctx context.Context, args []string) int {
 	repo, err := a.discoverRepo(".")
 	if err != nil {
 		return a.fail(err)
@@ -183,20 +210,32 @@ func (a *app) commandStart(args []string) int {
 		return a.fail(err)
 	}
 
-	return a.runStart(repo, graceSeconds, a.startIterations)
+	return a.runStart(ctx, repo, graceSeconds, a.startIterations)
 }
 
-func (a *app) runStart(repo repository, graceSeconds int, iterations int) int {
+func (a *app) runStart(ctx context.Context, repo repository, graceSeconds int, iterations int) int {
 	base := a.now()
 	fmt.Fprintf(a.stdout, "GitReal started for %s\n", repo.Root())
 
 	completed := 0
 	for iterations <= 0 || completed < iterations {
+		if ctx.Err() != nil {
+			fmt.Fprintln(a.stdout, "interrupted; stopping scheduler")
+			return 0
+		}
+
 		next := nextRandomSlot(base, a.rng)
 		fmt.Fprintf(a.stdout, "next challenge: %s\n", next.Format(time.RFC3339))
-		a.sleepUntil(next)
+		if err := a.sleepUntil(ctx, next); err != nil {
+			fmt.Fprintln(a.stdout, "interrupted; stopping scheduler")
+			return 0
+		}
 
-		if err := a.runChallenge(repo, graceSeconds, repo.ConfigBool("gitreal.armed", false)); err != nil {
+		if err := a.runChallenge(ctx, repo, graceSeconds, repo.ConfigBool("gitreal.armed", false)); err != nil {
+			if errors.Is(err, errInterrupted) {
+				fmt.Fprintln(a.stdout, "interrupted; stopping scheduler")
+				return 0
+			}
 			fmt.Fprintf(a.stderr, "git-real: %v\n", err)
 		}
 
@@ -281,7 +320,7 @@ func (a *app) commandRescue(args []string) int {
 
 		backupRef := args[1]
 		if !ggit.IsBackupRef(backupRef) {
-			fmt.Fprintln(a.stderr, "git-real rescue restore: ref must start with refs/gitreal/backups/")
+			fmt.Fprintln(a.stderr, "git-real rescue restore: ref must be a GitReal backup ref produced by 'git real rescue list'")
 			return 2
 		}
 
@@ -324,7 +363,7 @@ func (a *app) restoreBackupRef(repo repository, backupRef string) int {
 	return 0
 }
 
-func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error {
+func (a *app) runChallenge(ctx context.Context, repo repository, graceSeconds int, armed bool) error {
 	branch, err := repo.CurrentBranch()
 	if err != nil {
 		return err
@@ -359,7 +398,11 @@ func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error 
 	fmt.Fprintf(a.stdout, "deadline: %s\n", deadline.Format(time.RFC3339))
 	a.notify("GitReal", fmt.Sprintf("%s has %d unpushed commit(s). Push before %s.", branch, ahead, deadline.Format("15:04:05")))
 
-	a.sleepUntil(deadline)
+	if err := a.sleepUntil(ctx, deadline); err != nil {
+		// User cancelled during the grace period. The user has not yet missed
+		// the deadline from their perspective, so do not apply the penalty.
+		return errInterrupted
+	}
 
 	if err := repo.FetchQuiet(); err != nil {
 		a.notify("GitReal", "fetch failed; punishment skipped for safety.")
@@ -382,6 +425,11 @@ func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error 
 		a.notify("GitReal dry-run", fmt.Sprintf("%d commit(s) would be reset.", aheadAfter))
 		fmt.Fprintf(a.stdout, "dry-run: would reset %d commit(s) to @{u}\n", aheadAfter)
 		return nil
+	}
+
+	if ctx.Err() != nil {
+		fmt.Fprintln(a.stdout, "interrupted before reset; punishment skipped")
+		return errInterrupted
 	}
 
 	backupRef, err := repo.BackupHead(branch, a.now())
@@ -417,11 +465,12 @@ func (a *app) notify(title, message string) {
 	}
 }
 
-func (a *app) sleepUntil(target time.Time) {
+func (a *app) sleepUntil(ctx context.Context, target time.Time) error {
 	duration := target.Sub(a.now())
-	if duration > 0 {
-		a.sleep(duration)
+	if duration <= 0 {
+		return ctx.Err()
 	}
+	return a.sleep(ctx, duration)
 }
 
 func resolveGraceSeconds(args []string, repo repository, stderr io.Writer) (int, error) {

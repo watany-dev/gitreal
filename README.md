@@ -60,6 +60,8 @@ GitReal is intentionally conservative:
 - Before any reset, GitReal stores the current `HEAD` under `refs/gitreal/backups/...`.
 - `git real rescue restore <ref>` also backs up the current `HEAD` before restoring a backup.
 - Dirty worktree changes are stashed and then restored when possible.
+- `Ctrl-C` (SIGINT or SIGTERM) is honored at any point during a challenge: if you cancel
+  before the deadline, no penalty is applied.
 
 If you want real enforcement for the current repository:
 
@@ -170,6 +172,33 @@ Release archives are published as:
 - `git-real_linux_arm64.tar.gz`
 - `git-real_windows_amd64.zip`
 - `SHA256SUMS`
+- `SHA256SUMS.sig` (cosign keyless signature)
+- `SHA256SUMS.pem` (cosign certificate)
+
+### Verifying a release
+
+Releases are built with `-trimpath` and a pinned `SOURCE_DATE_EPOCH` so the
+binaries are reproducible from the tagged commit. The `SHA256SUMS` file is
+signed with [cosign](https://github.com/sigstore/cosign) keyless mode, tied to
+the GitHub Actions OIDC identity for this repository.
+
+```bash
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature SHA256SUMS.sig \
+  --certificate-identity-regexp '^https://github.com/watany-dev/gitreal/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
+sha256sum --check SHA256SUMS
+```
+
+You can confirm a downloaded binary matches the published source revision with:
+
+```bash
+git real --version
+# git-real v0.x.y (<commit>, built <iso8601-date>)
+```
 
 ## More Detail
 

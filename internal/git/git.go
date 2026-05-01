@@ -1,15 +1,33 @@
 package git
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
-	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const backupRefPrefix = "refs/gitreal/backups/"
+const (
+	backupRefPrefix    = "refs/gitreal/backups/"
+	maxSafeBranchBytes = 64
+)
+
+// backupRefPattern enforces the exact shape that BackupHead produces:
+//
+//	refs/gitreal/backups/<safeBranch>/<YYYYMMDDTHHMMSSZ>-<nanoseconds>
+//
+// The safeBranch segment is restricted to allowlisted characters so the
+// downstream `git update-ref` and `git reset --hard` cannot be tricked into
+// resolving git revision syntax (`@{N}`, `^`, `~`, `:`) or shell metacharacters.
+var backupRefPattern = regexp.MustCompile(
+	`^refs/gitreal/backups/[A-Za-z0-9._-]+/[0-9]{8}T[0-9]{6}Z-[0-9]{9}$`,
+)
+
+var safeBranchAllowed = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 type runner interface {
 	run(dir string, args ...string) (string, error)
@@ -141,17 +159,44 @@ func (r *Repository) AheadCount() (int, error) {
 }
 
 func (r *Repository) BackupHead(branch string, now time.Time) (string, error) {
-	safeBranch := strings.ReplaceAll(branch, string(filepath.Separator), "-")
-	safeBranch = strings.ReplaceAll(safeBranch, "/", "-")
+	safeBranch := sanitizeBranchSegment(branch)
 
 	timestamp := fmt.Sprintf("%s-%09d", now.UTC().Format("20060102T150405Z"), now.UTC().Nanosecond())
 	backupRef := fmt.Sprintf("%s%s/%s", backupRefPrefix, safeBranch, timestamp)
+
+	if !backupRefPattern.MatchString(backupRef) {
+		// Defense in depth: this should be impossible because
+		// sanitizeBranchSegment guarantees the allowed character class, but
+		// we never want to hand a malformed ref to `git update-ref`.
+		return "", fmt.Errorf("refusing to write malformed backup ref: %q", backupRef)
+	}
+
 	_, err := r.run("update-ref", backupRef, "HEAD")
 	if err != nil {
 		return "", err
 	}
 
 	return backupRef, nil
+}
+
+// sanitizeBranchSegment maps an arbitrary branch name (including hostile or
+// non-ASCII names) to a single ref path segment matching [A-Za-z0-9._-]+.
+// If the input would collapse to empty or to a leading dot/dash (which git
+// rejects), it falls back to a "branch-<sha256[:12]>" hash so we always
+// produce a stable, valid identifier.
+func sanitizeBranchSegment(branch string) string {
+	collapsed := safeBranchAllowed.ReplaceAllString(branch, "-")
+	collapsed = strings.Trim(collapsed, "-.")
+
+	for strings.Contains(collapsed, "--") {
+		collapsed = strings.ReplaceAll(collapsed, "--", "-")
+	}
+
+	if collapsed == "" || len(collapsed) > maxSafeBranchBytes {
+		sum := sha256.Sum256([]byte(branch))
+		return "branch-" + hex.EncodeToString(sum[:6])
+	}
+	return collapsed
 }
 
 func (r *Repository) StashDirtyWorktree(message string) (bool, error) {
@@ -196,8 +241,12 @@ func (r *Repository) RescueRefs() ([]string, error) {
 	return strings.Split(text, "\n"), nil
 }
 
+// IsBackupRef reports whether ref is a well-formed GitReal backup ref produced
+// by BackupHead. It performs a full pattern match (not just a prefix check) so
+// that user-supplied refs containing git revision syntax such as `@{-1}`,
+// `^`, `~`, or `:` cannot reach `git reset --hard` via `rescue restore`.
 func IsBackupRef(ref string) bool {
-	return strings.HasPrefix(ref, backupRefPrefix)
+	return backupRefPattern.MatchString(ref)
 }
 
 func (r *Repository) run(args ...string) (string, error) {
