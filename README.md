@@ -202,4 +202,4 @@ git real --version
 
 ## More Detail
 
-Design notes and implementation rationale live in [docs/development-memo.md](/workspaces/gitreal/docs/development-memo.md).
+Design notes and implementation rationale live in [docs/development-memo.md](docs/development-memo.md).
