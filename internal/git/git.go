@@ -98,6 +98,20 @@ func (r *Repository) ConfigInt(key string, fallback int) int {
 	return value
 }
 
+func (r *Repository) SetConfigString(key, value string) error {
+	_, err := r.run("config", "--local", key, value)
+	return err
+}
+
+func (r *Repository) ConfigString(key, fallback string) string {
+	out, err := r.run("config", "--get", key)
+	if err != nil {
+		return fallback
+	}
+
+	return strings.TrimSpace(out)
+}
+
 func (r *Repository) CurrentBranch() (string, error) {
 	out, err := r.run("symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil {
