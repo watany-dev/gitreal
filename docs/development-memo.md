@@ -38,18 +38,18 @@ git-real/
     git-real/
       main.go
   internal/
+    cli/
+      app.go
     git/
       git.go
     challenge/
-      challenge.go
+      grace.go
     notify/
       notify.go
-    config/
-      config.go
-    daemon/
-      daemon.go
   README.md
 ```
+
+現状の実装は `cmd/git-real/main.go` から `internal/cli` を呼び、Git 実行は `internal/git`、通知は `internal/notify` に分離している。`config` と `daemon` は将来拡張用の想定で、MVP ではまだ導入していない。
 
 ## ユーザー体験
 
@@ -141,9 +141,9 @@ git real rescue restore <ref>
 
 危険モードは必ず `git real arm` を明示的に要求する。デフォルトは dry-run。
 
-## 参考実装
+## 初期プロトタイプ
 
-初期の最小 CLI は以下の形をベースにする。配置先は `cmd/git-real/main.go` を想定する。
+初期の単一ファイル案は以下。現在の repository 実装はこの責務を `internal/cli`、`internal/git`、`internal/notify` に分割している。
 
 ```go
 package main

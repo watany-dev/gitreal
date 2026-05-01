@@ -34,15 +34,24 @@ git real rescue restore <ref>
 - Before any reset, GitReal stores the current `HEAD` under `refs/gitreal/backups/...`.
 - Recovery is done with `git real rescue list` and `git real rescue restore <ref>`.
 
-## Planned Implementation
+## Current Implementation
 
 - Language: Go
 - Binary name: `git-real`
 - Git integration: invoke Git commands directly instead of reading `.git` internals
+- Repository config: `gitreal.enabled`, `gitreal.armed`, `gitreal.graceSeconds`
 - Scheduler model:
   - `git real once` runs one challenge immediately
   - `git real start` runs in the foreground with hourly random timing
   - `git real daemon` is the future background/service entrypoint
+
+Current package layout:
+
+- `cmd/git-real`: executable entrypoint
+- `internal/cli`: command dispatch and challenge flow
+- `internal/git`: Git command wrapper and backup helpers
+- `internal/notify`: best-effort desktop notifications
+- `internal/challenge`: grace-period constants and normalization
 
 ## Local Build Target
 
@@ -88,4 +97,4 @@ go install github.com/yourname/git-real/cmd/git-real@latest
 
 ## Notes
 
-Detailed design notes, command rationale, Git plumbing choices, and the initial single-file Go prototype are stored in [docs/development-memo.md](/workspaces/gitreal/docs/development-memo.md).
+Detailed design notes, command rationale, Git plumbing choices, and the original prototype notes are stored in [docs/development-memo.md](/workspaces/gitreal/docs/development-memo.md).
