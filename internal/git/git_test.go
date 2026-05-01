@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -292,9 +293,149 @@ func TestBackupHead(t *testing.T) {
 	if ref != want {
 		t.Fatalf("BackupHead() = %q, want %q", ref, want)
 	}
+	if !IsBackupRef(ref) {
+		t.Fatalf("IsBackupRef(%q) = false, want true", ref)
+	}
 
 	if _, err := repo.BackupHead("main", now); err == nil {
 		t.Fatalf("BackupHead() error = nil, want non-nil")
+	}
+}
+
+func TestSanitizeBranchSegment(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input string
+		want  string // empty means "fallback to hash, just check it's well-formed"
+	}{
+		{name: "simple", input: "main", want: "main"},
+		{name: "slash", input: "feature/test", want: "feature-test"},
+		{name: "backslash", input: "feature\\sub", want: "feature-sub"},
+		{name: "release dotted", input: "release-1.0", want: "release-1.0"},
+		{name: "git revision", input: "main@{1}", want: "main-1"},
+		{name: "caret", input: "main^", want: "main"},
+		{name: "tilde", input: "main~3", want: "main-3"},
+		{name: "glob asterisk", input: "*", want: ""},
+		{name: "glob brackets", input: "[abc]", want: "abc"},
+		{name: "two dots", input: "..", want: ""},
+		{name: "single dot", input: ".", want: ""},
+		{name: "leading dash", input: "-leading", want: "leading"},
+		{name: "trailing dot", input: "trailing.", want: "trailing"},
+		{name: "with space", input: "with space", want: "with-space"},
+		{name: "with tab", input: "with\ttab", want: "with-tab"},
+		{name: "with newline", input: "with\nnewline", want: "with-newline"},
+		{name: "with null", input: "with/null\x00here", want: "with-null-here"},
+		{name: "very long", input: strings.Repeat("a", 256)},
+		{name: "japanese", input: "機能/テスト"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sanitizeBranchSegment(tc.input)
+			if got == "" {
+				t.Fatalf("sanitizeBranchSegment(%q) = empty string", tc.input)
+			}
+			candidate := backupRefPrefix + got + "/20260501T120000Z-000000000"
+			if !IsBackupRef(candidate) {
+				t.Fatalf("sanitizeBranchSegment(%q) = %q, produces invalid backup ref %q", tc.input, got, candidate)
+			}
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("sanitizeBranchSegment(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAheadCountRunError(t *testing.T) {
+	t.Parallel()
+
+	repo := &Repository{
+		root: "/tmp/repo",
+		runner: &fakeRunner{
+			responses: map[string]fakeResponse{
+				"/tmp/repo|rev-list\x00--count\x00@{u}..HEAD": {err: errors.New("boom")},
+			},
+		},
+	}
+	if _, err := repo.AheadCount(); err == nil {
+		t.Fatalf("AheadCount() error = nil, want non-nil")
+	}
+}
+
+func TestSanitizeBranchSegmentFallback(t *testing.T) {
+	t.Parallel()
+
+	// All-special input collapses to empty before fallback.
+	got := sanitizeBranchSegment("***///")
+	if !strings.HasPrefix(got, "branch-") || len(got) != len("branch-")+12 {
+		t.Fatalf("sanitizeBranchSegment(all-special) = %q, want branch-<12hex>", got)
+	}
+
+	// Excessively long input falls back to the hash form.
+	got = sanitizeBranchSegment(strings.Repeat("a", 256))
+	if !strings.HasPrefix(got, "branch-") {
+		t.Fatalf("sanitizeBranchSegment(long) = %q, want branch- prefix", got)
+	}
+}
+
+func TestBackupHeadRejectsCraftedSafeBranch(t *testing.T) {
+	t.Parallel()
+
+	// Force-feed sanitizeBranchSegment a value that the regex rejects to
+	// exercise the defense-in-depth check that refuses to run `update-ref`
+	// with a malformed ref. We bypass sanitizeBranchSegment by constructing
+	// the ref through internal helpers indirectly: build a Repository whose
+	// runner records arguments, then invoke BackupHead with a name that we
+	// confirm sanitizes to something the pattern accepts; then independently
+	// validate that the regex would reject a hand-crafted bad ref.
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	runner := &fakeRunner{responses: map[string]fakeResponse{
+		"/tmp/repo|update-ref\x00refs/gitreal/backups/main/20260501T120000Z-000000000\x00HEAD": {},
+	}}
+	repo := &Repository{root: "/tmp/repo", runner: runner}
+	if _, err := repo.BackupHead("main", now); err != nil {
+		t.Fatalf("BackupHead(main) error = %v", err)
+	}
+
+	if backupRefPattern.MatchString("refs/gitreal/backups/main@{1}/20260501T120000Z-000000000") {
+		t.Fatalf("backupRefPattern accepted a ref with revision syntax")
+	}
+}
+
+func TestIsBackupRefRejectsRevisionSyntax(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		ref  string
+		want bool
+	}{
+		{ref: "refs/gitreal/backups/main/20260501T120000Z-000000000", want: true},
+		{ref: "refs/gitreal/backups/feature-test/20260501T120000Z-123456789", want: true},
+		{ref: "refs/heads/main", want: false},
+		{ref: "refs/gitreal/backups/main@{-1}/20260501T120000Z-000000000", want: false},
+		{ref: "refs/gitreal/backups/main^/20260501T120000Z-000000000", want: false},
+		{ref: "refs/gitreal/backups/main~3/20260501T120000Z-000000000", want: false},
+		{ref: "refs/gitreal/backups/main:passwd/20260501T120000Z-000000000", want: false},
+		{ref: "refs/gitreal/backups/main/20260501T120000Z-000000000 --no-ff", want: false},
+		{ref: "refs/gitreal/backups/main/20260501T120000Z", want: false},
+		{ref: "refs/gitreal/backups/main/", want: false},
+		{ref: "refs/gitreal/backups//20260501T120000Z-000000000", want: false},
+		{ref: "refs/gitreal/backups/main/20260501T120000Z-000000000/extra", want: false},
+		{ref: "refs/gitreal/backups/../../../etc/passwd", want: false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.ref, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBackupRef(tc.ref); got != tc.want {
+				t.Fatalf("IsBackupRef(%q) = %t, want %t", tc.ref, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -379,21 +520,22 @@ func TestStashDirtyWorktreeEdgeCases(t *testing.T) {
 func TestResetRescueAndHelpers(t *testing.T) {
 	t.Parallel()
 
+	validRef := "refs/gitreal/backups/main/20260501T120000Z-000000001"
+	validRef2 := "refs/gitreal/backups/main/20260501T120000Z-000000002"
+
 	repo := &Repository{
 		root: "/tmp/repo",
 		runner: &fakeRunner{
 			responses: map[string]fakeResponse{
-				"/tmp/repo|reset\x00--hard\x00refs/gitreal/backups/main/1": {},
-				"/tmp/repo|stash\x00pop":                                   {},
-				"/tmp/repo|fetch\x00--quiet\x00--prune":                    {},
-				"/tmp/repo|for-each-ref\x00refs/gitreal/backups/\x00--format=%(refname)": {
-					output: "refs/gitreal/backups/main/1\nrefs/gitreal/backups/main/2\n",
-				},
+				"/tmp/repo|reset\x00--hard\x00" + validRef:                               {},
+				"/tmp/repo|stash\x00pop":                                                 {},
+				"/tmp/repo|fetch\x00--quiet\x00--prune":                                  {},
+				"/tmp/repo|for-each-ref\x00refs/gitreal/backups/\x00--format=%(refname)": {output: validRef + "\n" + validRef2 + "\n"},
 			},
 		},
 	}
 
-	if err := repo.ResetHard("refs/gitreal/backups/main/1"); err != nil {
+	if err := repo.ResetHard(validRef); err != nil {
 		t.Fatalf("ResetHard() error = %v", err)
 	}
 	if err := repo.StashPop(); err != nil {

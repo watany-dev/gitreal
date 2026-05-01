@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMainEndToEnd(t *testing.T) {
@@ -19,6 +21,7 @@ func TestMainEndToEnd(t *testing.T) {
 	runGit(t, repoDir, "checkout", "-b", "main")
 	runGit(t, repoDir, "config", "user.name", "GitReal Test")
 	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "config", "commit.gpgsign", "false")
 
 	writeFile(t, filepath.Join(repoDir, "file.txt"), "base\n")
 	runGit(t, repoDir, "add", "file.txt")
@@ -109,8 +112,70 @@ func runMain(t *testing.T, dir string, args ...string) (string, string, int) {
 
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
-	exitCode := Main(args, stdout, stderr)
+	exitCode := Main(context.Background(), args, stdout, stderr)
 	return stdout.String(), stderr.String(), exitCode
+}
+
+func TestMainOnceCancelledByContext(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	originDir := filepath.Join(workDir, "origin.git")
+	repoDir := filepath.Join(workDir, "repo")
+
+	runGit(t, workDir, "init", "--bare", originDir)
+	runGit(t, workDir, "clone", originDir, repoDir)
+	runGit(t, repoDir, "checkout", "-b", "main")
+	runGit(t, repoDir, "config", "user.name", "GitReal Test")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "config", "commit.gpgsign", "false")
+
+	writeFile(t, filepath.Join(repoDir, "file.txt"), "base\n")
+	runGit(t, repoDir, "add", "file.txt")
+	runGit(t, repoDir, "commit", "-m", "base")
+	runGit(t, repoDir, "push", "-u", "origin", "HEAD")
+
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatalf("Chdir() error = %v", err)
+	}
+	defer func() { _ = os.Chdir(previousDir) }()
+
+	if exit := Main(context.Background(), []string{"init"}, new(bytes.Buffer), new(bytes.Buffer)); exit != 0 {
+		t.Fatalf("init exit = %d, want 0", exit)
+	}
+	if exit := Main(context.Background(), []string{"arm"}, new(bytes.Buffer), new(bytes.Buffer)); exit != 0 {
+		t.Fatalf("arm exit = %d, want 0", exit)
+	}
+
+	writeFile(t, filepath.Join(repoDir, "file.txt"), "base\nlocal\n")
+	runGit(t, repoDir, "commit", "-am", "local")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	exitCode := Main(ctx, []string{"once", "--grace-seconds=30"}, stdout, stderr)
+	if exitCode != 0 {
+		t.Fatalf("once after cancel exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "interrupted") {
+		t.Fatalf("stdout = %q, want interrupt notice", stdout.String())
+	}
+	if ahead := strings.TrimSpace(runGitOutput(t, repoDir, "rev-list", "--count", "@{u}..HEAD")); ahead != "1" {
+		t.Fatalf("ahead after cancel = %q, want 1 (no penalty)", ahead)
+	}
+	out := runGitOutput(t, repoDir, "for-each-ref", "refs/gitreal/backups/")
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("backup refs created on cancel: %q", out)
+	}
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

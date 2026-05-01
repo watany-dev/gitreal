@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"math/rand"
 	"strings"
@@ -130,7 +131,8 @@ func (f *fakeRepo) BackupHead(branch string, now time.Time) (string, error) {
 	if f.backupRef != "" {
 		return f.backupRef, nil
 	}
-	return "refs/gitreal/backups/" + branch + "/" + now.UTC().Format("20060102T150405Z"), nil
+	timestamp := now.UTC().Format("20060102T150405Z") + "-000000000"
+	return "refs/gitreal/backups/" + branch + "/" + timestamp, nil
 }
 
 func (f *fakeRepo) StashDirtyWorktree(message string) (bool, error) {
@@ -158,15 +160,34 @@ func (f *fakeRepo) RescueRefs() ([]string, error) {
 }
 
 type fakeClock struct {
-	current time.Time
+	current   time.Time
+	cancelAt  time.Duration // cumulative slept time at which to fire the cancel
+	slept     time.Duration
+	cancelFn  context.CancelFunc
+	sleepHook func(d time.Duration) // optional pre-sleep hook for tests
 }
 
 func (f *fakeClock) now() time.Time {
 	return f.current
 }
 
-func (f *fakeClock) sleep(duration time.Duration) {
-	f.current = f.current.Add(duration)
+func (f *fakeClock) sleep(ctx context.Context, d time.Duration) error {
+	if f.sleepHook != nil {
+		f.sleepHook(d)
+	}
+	if f.cancelFn != nil && f.cancelAt > 0 {
+		next := f.slept + d
+		if next >= f.cancelAt {
+			// Advance the clock only up to the cancellation point and fire it.
+			f.current = f.current.Add(f.cancelAt - f.slept)
+			f.slept = f.cancelAt
+			f.cancelFn()
+			return ctx.Err()
+		}
+	}
+	f.slept += d
+	f.current = f.current.Add(d)
+	return ctx.Err()
 }
 
 func newTestApp(repo repository) (*app, *bytes.Buffer, *bytes.Buffer, *fakeClock, *[]string) {
@@ -200,7 +221,7 @@ func TestTopLevelRunAndNewApp(t *testing.T) {
 
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
-	if got := Run([]string{"help"}, stdout, stderr); got != 0 {
+	if got := Run(context.Background(), []string{"help"}, stdout, stderr); got != 0 {
 		t.Fatalf("Run(help) = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "git real once") {
@@ -222,7 +243,7 @@ func TestRunHelpAndUnknown(t *testing.T) {
 
 	app, stdout, stderr, _, _ := newTestApp(&fakeRepo{})
 
-	if got := app.run(nil); got != 0 {
+	if got := app.run(context.Background(), nil); got != 0 {
 		t.Fatalf("run(nil) = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "Usage:") {
@@ -231,7 +252,7 @@ func TestRunHelpAndUnknown(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if got := app.run([]string{"wat"}); got != 2 {
+	if got := app.run(context.Background(), []string{"wat"}); got != 2 {
 		t.Fatalf("run(unknown) = %d, want 2", got)
 	}
 	if !strings.Contains(stderr.String(), "unknown command: wat") {
@@ -252,7 +273,7 @@ func TestInitArmDisarmAndStatus(t *testing.T) {
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"init"}); got != 0 {
+	if got := app.run(context.Background(), []string{"init"}); got != 0 {
 		t.Fatalf("init exit code = %d, want 0", got)
 	}
 	if !repo.setBoolCalls["gitreal.enabled"] || repo.setBoolCalls["gitreal.armed"] {
@@ -263,7 +284,7 @@ func TestInitArmDisarmAndStatus(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if got := app.run([]string{"arm"}); got != 0 {
+	if got := app.run(context.Background(), []string{"arm"}); got != 0 {
 		t.Fatalf("arm exit code = %d, want 0", got)
 	}
 	if !repo.configBools["gitreal.armed"] {
@@ -271,7 +292,7 @@ func TestInitArmDisarmAndStatus(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if got := app.run([]string{"disarm"}); got != 0 {
+	if got := app.run(context.Background(), []string{"disarm"}); got != 0 {
 		t.Fatalf("disarm exit code = %d, want 0", got)
 	}
 	if repo.configBools["gitreal.armed"] {
@@ -279,7 +300,7 @@ func TestInitArmDisarmAndStatus(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if got := app.run([]string{"status"}); got != 0 {
+	if got := app.run(context.Background(), []string{"status"}); got != 0 {
 		t.Fatalf("status exit code = %d, want 0", got)
 	}
 
@@ -311,7 +332,7 @@ func TestStatusWithoutUpstream(t *testing.T) {
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"status"}); got != 0 {
+	if got := app.run(context.Background(), []string{"status"}); got != 0 {
 		t.Fatalf("status exit code = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "upstream: <none>") || !strings.Contains(stdout.String(), "ahead: unknown") {
@@ -329,10 +350,10 @@ func TestInitIsIdempotentAndResetsMode(t *testing.T) {
 	}
 	app, _, _, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"init"}); got != 0 {
+	if got := app.run(context.Background(), []string{"init"}); got != 0 {
 		t.Fatalf("first init exit code = %d, want 0", got)
 	}
-	if got := app.run([]string{"init"}); got != 0 {
+	if got := app.run(context.Background(), []string{"init"}); got != 0 {
 		t.Fatalf("second init exit code = %d, want 0", got)
 	}
 	if !repo.configBools["gitreal.enabled"] {
@@ -385,7 +406,7 @@ func TestCommandOnceViaRun(t *testing.T) {
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"once"}); got != 0 {
+	if got := app.run(context.Background(), []string{"once"}); got != 0 {
 		t.Fatalf("once exit code = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "nothing to do") {
@@ -405,7 +426,7 @@ func TestCommandParseFailures(t *testing.T) {
 	}
 	app, _, stderr, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"once", "--grace-seconds=nope"}); got != 2 {
+	if got := app.run(context.Background(), []string{"once", "--grace-seconds=nope"}); got != 2 {
 		t.Fatalf("once invalid exit code = %d, want 2", got)
 	}
 	if !strings.Contains(stderr.String(), "invalid value") {
@@ -413,7 +434,7 @@ func TestCommandParseFailures(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if got := app.run([]string{"start", "extra"}); got != 2 {
+	if got := app.run(context.Background(), []string{"start", "extra"}); got != 2 {
 		t.Fatalf("start invalid exit code = %d, want 2", got)
 	}
 }
@@ -429,7 +450,7 @@ func TestRunChallengeNoUnpushedCommits(t *testing.T) {
 	}
 	app, stdout, _, _, notifications := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 120, false); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 120, false); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if repo.fetchCalls != 1 {
@@ -454,7 +475,7 @@ func TestRunChallengeDryRun(t *testing.T) {
 	}
 	app, stdout, _, clock, notifications := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 120, false); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 120, false); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if !strings.Contains(stdout.String(), "dry-run: would reset 2 commit(s) to @{u}") {
@@ -479,7 +500,7 @@ func TestRunChallengePushConfirmed(t *testing.T) {
 	}
 	app, stdout, _, _, notifications := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 30, false); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 30, false); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if !strings.Contains(stdout.String(), "push confirmed") {
@@ -502,7 +523,7 @@ func TestRunChallengePreflightFetchFailureContinues(t *testing.T) {
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 30, false); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 30, false); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if !strings.Contains(stdout.String(), "preflight fetch failed; continuing with last known upstream state: fetch failed") {
@@ -525,7 +546,7 @@ func TestRunChallengeFetchFailureSkipsPunishment(t *testing.T) {
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 30, true); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 30, true); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if len(repo.resetCalls) != 0 {
@@ -544,12 +565,12 @@ func TestRunChallengeArmed(t *testing.T) {
 		currentBranch: "main",
 		upstream:      "origin/main",
 		aheadCounts:   []int{2, 2},
-		backupRef:     "refs/gitreal/backups/main/20260501T120200Z",
+		backupRef:     "refs/gitreal/backups/main/20260501T120200Z-000000000",
 		stashDirty:    true,
 	}
 	app, stdout, _, _, notifications := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 120, true); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 120, true); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if len(repo.resetCalls) != 1 || repo.resetCalls[0] != "@{u}" {
@@ -566,6 +587,63 @@ func TestRunChallengeArmed(t *testing.T) {
 	}
 }
 
+func TestRunChallengeCancelDuringGracePeriodSkipsReset(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{2, 2},
+	}
+	app, stdout, _, clock, _ := newTestApp(repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clock.cancelFn = cancel
+	clock.cancelAt = 30 * time.Second // fire cancel mid-grace
+
+	if err := app.runChallenge(ctx, repo, 120, true); err == nil || !errors.Is(err, errInterrupted) {
+		t.Fatalf("runChallenge() error = %v, want errInterrupted", err)
+	}
+	if len(repo.resetCalls) != 0 {
+		t.Fatalf("resetCalls = %v, want none after cancel", repo.resetCalls)
+	}
+	if len(repo.backupCalls) != 0 {
+		t.Fatalf("backupCalls = %v, want none after cancel", repo.backupCalls)
+	}
+	if strings.Contains(stdout.String(), "Local commits made unreal") {
+		t.Fatalf("stdout = %q, must not contain penalty message", stdout.String())
+	}
+}
+
+func TestCommandOnceTreatsCancelAsCleanExit(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": true},
+		configInts:    map[string]int{"gitreal.graceSeconds": 30},
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{1, 1},
+	}
+	app, stdout, _, clock, _ := newTestApp(repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clock.cancelFn = cancel
+	clock.cancelAt = 5 * time.Second
+
+	if got := app.run(ctx, []string{"once"}); got != 0 {
+		t.Fatalf("once after cancel exit = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "interrupted") {
+		t.Fatalf("stdout = %q, want interrupted notice", stdout.String())
+	}
+	if len(repo.resetCalls) != 0 {
+		t.Fatalf("resetCalls = %v, want none", repo.resetCalls)
+	}
+}
+
 func TestRunChallengeStashPopFailure(t *testing.T) {
 	t.Parallel()
 
@@ -574,13 +652,13 @@ func TestRunChallengeStashPopFailure(t *testing.T) {
 		currentBranch: "main",
 		upstream:      "origin/main",
 		aheadCounts:   []int{1, 1},
-		backupRef:     "refs/gitreal/backups/main/1",
+		backupRef:     "refs/gitreal/backups/main/20260501T120000Z-000000001",
 		stashDirty:    true,
 		stashPopErr:   errors.New("conflict"),
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if err := app.runChallenge(repo, 1, true); err != nil {
+	if err := app.runChallenge(context.Background(), repo, 1, true); err != nil {
 		t.Fatalf("runChallenge() error = %v", err)
 	}
 	if !strings.Contains(stdout.String(), "stash pop failed") {
@@ -613,11 +691,11 @@ func TestRunChallengeErrors(t *testing.T) {
 		},
 		{
 			name: "stash error",
-			repo: &fakeRepo{currentBranch: "main", upstream: "origin/main", aheadCounts: []int{1, 1}, backupRef: "refs/gitreal/backups/main/1", stashErr: errors.New("boom")},
+			repo: &fakeRepo{currentBranch: "main", upstream: "origin/main", aheadCounts: []int{1, 1}, backupRef: "refs/gitreal/backups/main/20260501T120000Z-000000001", stashErr: errors.New("boom")},
 		},
 		{
 			name: "reset error",
-			repo: &fakeRepo{currentBranch: "main", upstream: "origin/main", aheadCounts: []int{1, 1}, backupRef: "refs/gitreal/backups/main/1", resetErr: errors.New("boom")},
+			repo: &fakeRepo{currentBranch: "main", upstream: "origin/main", aheadCounts: []int{1, 1}, backupRef: "refs/gitreal/backups/main/20260501T120000Z-000000001", resetErr: errors.New("boom")},
 		},
 	}
 
@@ -626,7 +704,7 @@ func TestRunChallengeErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			app, _, _, _, _ := newTestApp(tc.repo)
-			if err := app.runChallenge(tc.repo, 1, true); err == nil {
+			if err := app.runChallenge(context.Background(), tc.repo, 1, true); err == nil {
 				t.Fatalf("runChallenge() error = nil, want non-nil")
 			}
 		})
@@ -653,29 +731,29 @@ func TestRescueCommands(t *testing.T) {
 
 	repo := &fakeRepo{
 		currentBranch: "main",
-		backupRef:     "refs/gitreal/backups/main/current",
+		backupRef:     "refs/gitreal/backups/main/20260501T120100Z-000000000",
 		rescueRefs: []string{
-			"refs/gitreal/backups/main/1",
-			"refs/gitreal/backups/main/2",
+			"refs/gitreal/backups/main/20260501T120000Z-000000001",
+			"refs/gitreal/backups/main/20260501T120000Z-000000002",
 		},
 	}
 	app, stdout, stderr, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"rescue", "list"}); got != 0 {
+	if got := app.run(context.Background(), []string{"rescue", "list"}); got != 0 {
 		t.Fatalf("rescue list exit code = %d, want 0", got)
 	}
-	if !strings.Contains(stdout.String(), "refs/gitreal/backups/main/1") {
+	if !strings.Contains(stdout.String(), "refs/gitreal/backups/main/20260501T120000Z-000000001") {
 		t.Fatalf("stdout = %q, want rescue refs", stdout.String())
 	}
 
 	stdout.Reset()
-	if got := app.run([]string{"rescue", "restore", "refs/gitreal/backups/main/1"}); got != 0 {
+	if got := app.run(context.Background(), []string{"rescue", "restore", "refs/gitreal/backups/main/20260501T120000Z-000000001"}); got != 0 {
 		t.Fatalf("rescue restore exit code = %d, want 0", got)
 	}
-	if len(repo.resetCalls) != 1 || repo.resetCalls[0] != "refs/gitreal/backups/main/1" {
+	if len(repo.resetCalls) != 1 || repo.resetCalls[0] != "refs/gitreal/backups/main/20260501T120000Z-000000001" {
 		t.Fatalf("resetCalls = %v, want restore ref", repo.resetCalls)
 	}
-	if !strings.Contains(stdout.String(), "Current branch reset to backup ref: refs/gitreal/backups/main/1") {
+	if !strings.Contains(stdout.String(), "Current branch reset to backup ref: refs/gitreal/backups/main/20260501T120000Z-000000001") {
 		t.Fatalf("stdout = %q, want restore success message", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "previous HEAD backed up to: "+repo.backupRef) {
@@ -687,10 +765,10 @@ func TestRescueCommands(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if got := app.run([]string{"rescue", "restore", "refs/heads/main"}); got != 2 {
+	if got := app.run(context.Background(), []string{"rescue", "restore", "refs/heads/main"}); got != 2 {
 		t.Fatalf("rescue restore invalid exit code = %d, want 2", got)
 	}
-	if !strings.Contains(stderr.String(), "ref must start with refs/gitreal/backups/") {
+	if !strings.Contains(stderr.String(), "ref must be a GitReal backup ref") {
 		t.Fatalf("stderr = %q, want backup prefix error", stderr.String())
 	}
 }
@@ -700,13 +778,13 @@ func TestRescueRestoreStashPopFailure(t *testing.T) {
 
 	repo := &fakeRepo{
 		currentBranch: "main",
-		backupRef:     "refs/gitreal/backups/main/current",
+		backupRef:     "refs/gitreal/backups/main/20260501T120100Z-000000000",
 		stashDirty:    true,
 		stashPopErr:   errors.New("conflict"),
 	}
 	app, stdout, _, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"rescue", "restore", "refs/gitreal/backups/main/1"}); got != 0 {
+	if got := app.run(context.Background(), []string{"rescue", "restore", "refs/gitreal/backups/main/20260501T120000Z-000000001"}); got != 0 {
 		t.Fatalf("rescue restore exit code = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "stash pop failed") {
@@ -721,7 +799,7 @@ func TestRescueCommandErrors(t *testing.T) {
 	t.Parallel()
 
 	app, _, stderr, _, _ := newTestApp(&fakeRepo{})
-	if got := app.run([]string{"rescue"}); got != 2 {
+	if got := app.run(context.Background(), []string{"rescue"}); got != 2 {
 		t.Fatalf("rescue exit code = %d, want 2", got)
 	}
 	if !strings.Contains(stderr.String(), "expected subcommand list or restore <ref>") {
@@ -729,7 +807,7 @@ func TestRescueCommandErrors(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if got := app.run([]string{"rescue", "wat"}); got != 2 {
+	if got := app.run(context.Background(), []string{"rescue", "wat"}); got != 2 {
 		t.Fatalf("rescue unknown exit code = %d, want 2", got)
 	}
 	if !strings.Contains(stderr.String(), "unknown subcommand: wat") {
@@ -737,12 +815,12 @@ func TestRescueCommandErrors(t *testing.T) {
 	}
 
 	stderr.Reset()
-	if got := app.run([]string{"rescue", "list", "extra"}); got != 2 {
+	if got := app.run(context.Background(), []string{"rescue", "list", "extra"}); got != 2 {
 		t.Fatalf("rescue list exit code = %d, want 2", got)
 	}
 
 	stderr.Reset()
-	if got := app.run([]string{"rescue", "restore"}); got != 2 {
+	if got := app.run(context.Background(), []string{"rescue", "restore"}); got != 2 {
 		t.Fatalf("rescue restore exit code = %d, want 2", got)
 	}
 }
@@ -761,7 +839,7 @@ func TestCommandStartSingleIteration(t *testing.T) {
 	app, stdout, _, _, _ := newTestApp(repo)
 	app.startIterations = 1
 
-	if got := app.run([]string{"start"}); got != 0 {
+	if got := app.run(context.Background(), []string{"start"}); got != 0 {
 		t.Fatalf("start exit code = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "GitReal started for /tmp/repo") || !strings.Contains(stdout.String(), "next challenge:") {
@@ -781,11 +859,136 @@ func TestCommandStartHandlesChallengeError(t *testing.T) {
 	app, _, stderr, _, _ := newTestApp(repo)
 	app.startIterations = 1
 
-	if got := app.run([]string{"start"}); got != 0 {
+	if got := app.run(context.Background(), []string{"start"}); got != 0 {
 		t.Fatalf("start exit code = %d, want 0", got)
 	}
 	if !strings.Contains(stderr.String(), "detached") {
 		t.Fatalf("stderr = %q, want challenge error", stderr.String())
+	}
+}
+
+func TestSleepUntilWithPastDeadline(t *testing.T) {
+	t.Parallel()
+
+	app, _, _, clock, _ := newTestApp(&fakeRepo{})
+	if err := app.sleepUntil(context.Background(), clock.now().Add(-time.Hour)); err != nil {
+		t.Fatalf("sleepUntil(past) = %v, want nil", err)
+	}
+}
+
+func TestSleepWithContextHonoursCancellationAndZeroDuration(t *testing.T) {
+	t.Parallel()
+
+	if err := sleepWithContext(context.Background(), 0); err != nil {
+		t.Fatalf("sleepWithContext(zero) error = %v, want nil", err)
+	}
+
+	if err := sleepWithContext(context.Background(), -time.Second); err != nil {
+		t.Fatalf("sleepWithContext(negative) error = %v, want nil", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := sleepWithContext(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sleepWithContext(cancelled) error = %v, want canceled", err)
+	}
+
+	start := time.Now()
+	if err := sleepWithContext(context.Background(), 5*time.Millisecond); err != nil {
+		t.Fatalf("sleepWithContext(positive) error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 4*time.Millisecond {
+		t.Fatalf("sleepWithContext returned too fast: %v", elapsed)
+	}
+}
+
+func TestRunStartCancelBetweenIterations(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
+		configInts:    map[string]int{"gitreal.graceSeconds": 30},
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{0},
+	}
+	app, stdout, _, _, _ := newTestApp(repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before runStart begins
+
+	if got := app.runStart(ctx, repo, 30, 5); got != 0 {
+		t.Fatalf("runStart() exit = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "interrupted; stopping scheduler") {
+		t.Fatalf("stdout = %q, want scheduler stop notice", stdout.String())
+	}
+}
+
+func TestRunStartContinuesPastChallengeError(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:             "/tmp/repo",
+		configBools:      map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
+		configInts:       map[string]int{"gitreal.graceSeconds": 30},
+		currentBranchErr: errors.New("detached"),
+	}
+	app, _, stderr, _, _ := newTestApp(repo)
+
+	if got := app.runStart(context.Background(), repo, 30, 1); got != 0 {
+		t.Fatalf("runStart() exit = %d, want 0", got)
+	}
+	if !strings.Contains(stderr.String(), "detached") {
+		t.Fatalf("stderr = %q, want challenge error", stderr.String())
+	}
+}
+
+func TestRunStartCancelStopsLoopWithoutChallenge(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		configBools:   map[string]bool{"gitreal.enabled": true, "gitreal.armed": false},
+		configInts:    map[string]int{"gitreal.graceSeconds": 30},
+		currentBranch: "main",
+		upstream:      "origin/main",
+		aheadCounts:   []int{0},
+	}
+	app, stdout, _, clock, _ := newTestApp(repo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	clock.cancelFn = cancel
+	clock.cancelAt = 1 * time.Second // cancel during the wait for next slot
+
+	if got := app.runStart(ctx, repo, 30, 5); got != 0 {
+		t.Fatalf("runStart() exit = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "interrupted; stopping scheduler") {
+		t.Fatalf("stdout = %q, want scheduler stop notice", stdout.String())
+	}
+	if repo.fetchCalls != 0 {
+		t.Fatalf("fetchCalls = %d, want 0 (no challenge ran)", repo.fetchCalls)
+	}
+}
+
+func TestRestoreBackupRefBackupHeadFailure(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		root:          "/tmp/repo",
+		currentBranch: "main",
+		backupErr:     errors.New("update-ref failed"),
+	}
+	app, _, stderr, _, _ := newTestApp(repo)
+
+	if got := app.run(context.Background(), []string{"rescue", "restore", "refs/gitreal/backups/main/20260501T120000Z-000000001"}); got != 1 {
+		t.Fatalf("rescue restore exit = %d, want 1", got)
+	}
+	if !strings.Contains(stderr.String(), "update-ref failed") {
+		t.Fatalf("stderr = %q, want backup error", stderr.String())
 	}
 }
 
@@ -821,7 +1024,7 @@ func TestCommandFailures(t *testing.T) {
 			return nil, discoverErr
 		},
 		now:              time.Now,
-		sleep:            time.Sleep,
+		sleep:            sleepWithContext,
 		sendNotification: func(title, message string) error { return nil },
 		rng:              rand.New(rand.NewSource(1)),
 		stdout:           stdout,
@@ -831,7 +1034,7 @@ func TestCommandFailures(t *testing.T) {
 	for _, args := range [][]string{{"init"}, {"status"}, {"once"}, {"start"}, {"arm"}, {"disarm"}, {"rescue", "list"}} {
 		stdout.Reset()
 		stderr.Reset()
-		if got := app.run(args); got != 1 {
+		if got := app.run(context.Background(), args); got != 1 {
 			t.Fatalf("run(%v) = %d, want 1", args, got)
 		}
 		if !strings.Contains(stderr.String(), "not inside a Git repository") {
@@ -862,7 +1065,7 @@ func TestCommandsRequireInitialization(t *testing.T) {
 			}
 			app, _, stderr, _, _ := newTestApp(repo)
 
-			if got := app.run(tc.args); got != 1 {
+			if got := app.run(context.Background(), tc.args); got != 1 {
 				t.Fatalf("run(%v) = %d, want 1", tc.args, got)
 			}
 			if !strings.Contains(stderr.String(), "repository is not initialized for GitReal; run: git real init") {
@@ -881,11 +1084,11 @@ func TestStatusAndRescueWorkWithoutInitialization(t *testing.T) {
 		configInts:    map[string]int{"gitreal.graceSeconds": 120},
 		currentBranch: "main",
 		upstreamErr:   errors.New("missing"),
-		rescueRefs:    []string{"refs/gitreal/backups/main/1"},
+		rescueRefs:    []string{"refs/gitreal/backups/main/20260501T120000Z-000000001"},
 	}
 	app, stdout, stderr, _, _ := newTestApp(repo)
 
-	if got := app.run([]string{"status"}); got != 0 {
+	if got := app.run(context.Background(), []string{"status"}); got != 0 {
 		t.Fatalf("status exit code = %d, want 0", got)
 	}
 	if !strings.Contains(stdout.String(), "enabled: false") {
@@ -894,10 +1097,10 @@ func TestStatusAndRescueWorkWithoutInitialization(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if got := app.run([]string{"rescue", "list"}); got != 0 {
+	if got := app.run(context.Background(), []string{"rescue", "list"}); got != 0 {
 		t.Fatalf("rescue list exit code = %d, want 0", got)
 	}
-	if !strings.Contains(stdout.String(), "refs/gitreal/backups/main/1") {
+	if !strings.Contains(stdout.String(), "refs/gitreal/backups/main/20260501T120000Z-000000001") {
 		t.Fatalf("stdout = %q, want rescue refs", stdout.String())
 	}
 }
@@ -907,7 +1110,7 @@ func TestConfigWriteFailures(t *testing.T) {
 
 	repo := &fakeRepo{setBoolErr: errors.New("boom")}
 	app, _, stderr, _, _ := newTestApp(repo)
-	if got := app.run([]string{"init"}); got != 1 {
+	if got := app.run(context.Background(), []string{"init"}); got != 1 {
 		t.Fatalf("init exit code = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "boom") {
@@ -928,14 +1131,14 @@ func TestConfigWriteFailures(t *testing.T) {
 		setBoolErr:  errors.New("boom"),
 	}
 	app, _, stderr, _, _ = newTestApp(repo)
-	if got := app.run([]string{"arm"}); got != 1 {
+	if got := app.run(context.Background(), []string{"arm"}); got != 1 {
 		t.Fatalf("arm exit code = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "boom") {
 		t.Fatalf("stderr = %q, want config error", stderr.String())
 	}
 	stderr.Reset()
-	if got := app.run([]string{"disarm"}); got != 1 {
+	if got := app.run(context.Background(), []string{"disarm"}); got != 1 {
 		t.Fatalf("disarm exit code = %d, want 1", got)
 	}
 	if !strings.Contains(stderr.String(), "boom") {

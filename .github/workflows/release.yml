@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # required for cosign keyless signing via OIDC
 
 jobs:
   build-release:
@@ -38,6 +39,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -46,19 +49,39 @@ jobs:
       - run: go mod download
 
       - name: Build archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          artifact_name="git-real_${{ matrix.goos }}_${{ matrix.goarch }}"
-          archive_name="${artifact_name}.${{ matrix.archive_ext }}"
+          artifact_name="git-real_${GOOS}_${GOARCH}"
+          archive_name="${artifact_name}.${ARCHIVE_EXT}"
 
           mkdir -p "dist/${artifact_name}"
 
-          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" go build -o "dist/${artifact_name}/${{ matrix.binary_name }}" ./cmd/git-real
+          version="$(git describe --tags --always --dirty)"
+          commit="$(git rev-parse HEAD)"
+          date="$(git log -1 --format=%cI)"
 
-          if [ "${{ matrix.archive_ext }}" = "zip" ]; then
-            zip -j "dist/${archive_name}" "dist/${artifact_name}/${{ matrix.binary_name }}"
+          # Pin the build timestamp to the tag commit's author date so that
+          # rebuilding from the same source produces a byte-identical binary.
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+
+          go build \
+            -trimpath \
+            -buildvcs=true \
+            -ldflags="-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${date}" \
+            -o "dist/${artifact_name}/${BINARY_NAME}" \
+            ./cmd/git-real
+
+          if [ "${ARCHIVE_EXT}" = "zip" ]; then
+            (cd dist && zip -j "${archive_name}" "${artifact_name}/${BINARY_NAME}")
           else
-            tar -C dist -czf "dist/${archive_name}" "${artifact_name}"
+            tar -C dist --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
+              -czf "dist/${archive_name}" "${artifact_name}"
           fi
 
       - uses: actions/upload-artifact@v4
@@ -81,8 +104,26 @@ jobs:
       - name: Generate checksums
         run: |
           set -euo pipefail
-          sha256sum dist/* > dist/SHA256SUMS
+          (cd dist && sha256sum git-real_*.tar.gz git-real_*.zip > SHA256SUMS)
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums with cosign (keyless OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --output-signature dist/SHA256SUMS.sig \
+            --output-certificate dist/SHA256SUMS.pem \
+            dist/SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/git-real_*.tar.gz
+            dist/git-real_*.zip
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.pem

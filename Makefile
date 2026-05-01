@@ -8,10 +8,21 @@ export GOMODCACHE ?= $(CACHE_DIR)/gomod
 export GOPATH ?= $(CACHE_DIR)/gopath
 export XDG_CACHE_HOME ?= $(CACHE_DIR)/xdg
 
+# Reproducible-build inputs. Override on the command line for releases:
+#   make build VERSION=v1.2.3 COMMIT=$(git rev-parse HEAD) DATE=$(git log -1 --format=%cI)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null || echo none)
+DATE    ?= $(shell git log -1 --format=%cI 2>/dev/null || echo unknown)
+
+LDFLAGS := -s -w \
+	-X main.version=$(VERSION) \
+	-X main.commit=$(COMMIT) \
+	-X main.date=$(DATE)
+
 .PHONY: build fmt fmt-check lint typecheck deadcode test coverage check
 
 build:
-	$(GO) build -o git-real ./cmd/git-real
+	$(GO) build -trimpath -buildvcs=true -ldflags='$(LDFLAGS)' -o git-real ./cmd/git-real
 
 fmt:
 	$(GO) fmt ./...
