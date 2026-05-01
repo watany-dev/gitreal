@@ -1,6 +1,7 @@
 GO ?= go
 COVERAGE_THRESHOLD ?= 95
 GOFMT_TARGETS := cmd internal
+MAIN_PKG := ./cmd/git-real
 CACHE_DIR ?= $(CURDIR)/.cache
 
 export GOCACHE ?= $(CACHE_DIR)/go-build
@@ -22,7 +23,7 @@ LDFLAGS := -s -w \
 .PHONY: build fmt fmt-check lint typecheck deadcode test test-race coverage vuln actionlint check
 
 build:
-	$(GO) build -trimpath -buildvcs=true -ldflags='$(LDFLAGS)' -o git-real ./cmd/git-real
+	$(GO) build -trimpath -buildvcs=true -ldflags='$(LDFLAGS)' -o git-real $(MAIN_PKG)
 
 fmt:
 	$(GO) fmt ./...
@@ -46,7 +47,7 @@ typecheck:
 	$(GO) test -run '^$$' ./...
 
 deadcode:
-	$(GO) tool deadcode ./cmd/git-real
+	$(GO) tool deadcode $(MAIN_PKG)
 
 test:
 	$(GO) test ./...
