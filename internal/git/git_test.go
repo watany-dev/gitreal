@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -603,8 +604,22 @@ func TestDiscoverIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
-	if repo.Root() != tempDir {
-		t.Fatalf("Root() = %q, want %q", repo.Root(), tempDir)
+	// `git rev-parse --show-toplevel` returns a path that has been resolved
+	// for symlinks (macOS: /var → /private/var) and that uses forward slashes
+	// regardless of OS (Windows: C:/Users/... vs Go's native C:\Users\...).
+	// Normalize both sides through filepath.FromSlash + EvalSymlinks so the
+	// comparison is OS-agnostic — also resolves Windows 8.3 short names like
+	// RUNNER~1 to their long form.
+	got, err := filepath.EvalSymlinks(filepath.FromSlash(repo.Root()))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(Root()=%q) error = %v", repo.Root(), err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.FromSlash(tempDir))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(tempDir=%q) error = %v", tempDir, err)
+	}
+	if got != want {
+		t.Fatalf("Root() = %q (normalized %q), want %q (normalized %q)", repo.Root(), got, tempDir, want)
 	}
 
 	if err := repo.SetConfigBool("gitreal.enabled", true); err != nil {

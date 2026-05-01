@@ -95,52 +95,6 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
-  # Temporary diagnostic job: when the test matrix fails, download every test
-  # output artifact and post the tail of each as a PR comment. Actions logs
-  # are gated behind authentication so this is currently the most reliable way
-  # to surface OS-specific failures. Remove once the matrix is consistently
-  # green.
-  diagnose-test-failure:
-    if: failure() && github.event_name == 'pull_request'
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          path: ./diag
-          pattern: test-output-*
-
-      - name: Post test output as PR comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "## Test failure diagnostics ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            echo
-            echo "Auto-generated from ci run \`${GITHUB_RUN_ID}\` on commit \`${GITHUB_SHA::7}\`."
-            for d in diag/test-output-*; do
-              os="${d#diag/test-output-}"
-              echo
-              echo "<details><summary>$os (last 200 lines)</summary>"
-              echo
-              echo '```'
-              tail -200 "$d/test-output.txt"
-              echo '```'
-              echo "</details>"
-            done
-          } > comment.md
-          gh pr comment "$PR_NUMBER" --body-file comment.md
-
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 5
