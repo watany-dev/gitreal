@@ -2,6 +2,7 @@ package notify
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +110,27 @@ func TestSendUsesPackageVariables(t *testing.T) {
 	}
 	if !called {
 		t.Fatalf("Send() did not invoke runCommand")
+	}
+}
+
+func TestCommandEscapesWindowsToastText(t *testing.T) {
+	t.Parallel()
+
+	_, args, ok := command("windows", `O'Hare <title>`, "line 1 & line 2")
+	if !ok {
+		t.Fatalf("command(windows) ok = false, want true")
+	}
+	if len(args) != 3 {
+		t.Fatalf("command(windows) args = %v, want 3 args", args)
+	}
+
+	script := args[2]
+	for _, want := range []string{
+		`O&#39;Hare &lt;title&gt;`,
+		`line 1 &amp; line 2`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script = %q, want substring %q", script, want)
+		}
 	}
 }

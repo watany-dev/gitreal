@@ -78,6 +78,13 @@ git real rescue restore <backup-ref>
 
 `git real once`、`git real start`、`git real arm`、`git real disarm` は `git real init` 後にのみ動かす。未初期化でも `git real status` と `git real rescue ...` は使える。
 
+現状の制約も明示しておく。
+
+- challenge 実行には upstream branch が必要
+- detached HEAD は非対応
+- 通知は best-effort で、使えない環境では標準出力へのフォールバックになる
+- `git real daemon` はまだ未実装
+
 ## 設定方針
 
 設定は Git config に入れる。
@@ -128,6 +135,10 @@ git stash pop
 
 この順序にする理由は、`reset --hard @{u}` でブランチ先端を upstream に戻す前に、元の `HEAD` を `refs/gitreal/backups/...` に退避するため。これにより「ローカルコミットがなかったことになる」体験を出しつつ、事故時は `git real rescue restore` で戻せる。
 
+## Rescue restore 処理
+
+`git real rescue restore <ref>` も破壊的操作なので、restore 前に現在の `HEAD` を `refs/gitreal/backups/...` に退避する。worktree が dirty な場合は stash してから restore し、restore 後に stash pop を試みる。
+
 ## MVP コマンド
 
 ```text
@@ -147,6 +158,7 @@ git real rescue restore <ref>
 
 - 正式なベータ導線は `go install` と GitHub Releases に絞る
 - Release artifact は macOS / Linux / Windows 向けに出す
+- Release には `SHA256SUMS` を含める
 - `git real daemon` と Homebrew tap は次フェーズの課題として残す
 
 ## 初期プロトタイプ

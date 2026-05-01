@@ -144,7 +144,8 @@ func (r *Repository) BackupHead(branch string, now time.Time) (string, error) {
 	safeBranch := strings.ReplaceAll(branch, string(filepath.Separator), "-")
 	safeBranch = strings.ReplaceAll(safeBranch, "/", "-")
 
-	backupRef := fmt.Sprintf("%s%s/%s", backupRefPrefix, safeBranch, now.UTC().Format("20060102T150405Z"))
+	timestamp := fmt.Sprintf("%s-%09d", now.UTC().Format("20060102T150405Z"), now.UTC().Nanosecond())
+	backupRef := fmt.Sprintf("%s%s/%s", backupRefPrefix, safeBranch, timestamp)
 	_, err := r.run("update-ref", backupRef, "HEAD")
 	if err != nil {
 		return "", err

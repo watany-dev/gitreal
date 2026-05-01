@@ -285,16 +285,43 @@ func (a *app) commandRescue(args []string) int {
 			return 2
 		}
 
-		if err := repo.ResetHard(backupRef); err != nil {
-			return a.fail(err)
-		}
-
-		fmt.Fprintf(a.stdout, "Current branch reset to backup ref: %s\n", backupRef)
-		return 0
+		return a.restoreBackupRef(repo, backupRef)
 	default:
 		fmt.Fprintf(a.stderr, "git-real rescue: unknown subcommand: %s\n", args[0])
 		return 2
 	}
+}
+
+func (a *app) restoreBackupRef(repo repository, backupRef string) int {
+	branch, err := repo.CurrentBranch()
+	if err != nil {
+		return a.fail(err)
+	}
+
+	currentBackupRef, err := repo.BackupHead(branch, a.now())
+	if err != nil {
+		return a.fail(err)
+	}
+
+	stashMessage := fmt.Sprintf("gitreal preserve worktree before rescue restore %s", currentBackupRef)
+	stashed, err := repo.StashDirtyWorktree(stashMessage)
+	if err != nil {
+		return a.fail(err)
+	}
+
+	if err := repo.ResetHard(backupRef); err != nil {
+		return a.fail(err)
+	}
+
+	if stashed {
+		if err := repo.StashPop(); err != nil {
+			fmt.Fprintln(a.stdout, "stash pop failed; your stash remains available via git stash list")
+		}
+	}
+
+	fmt.Fprintf(a.stdout, "Current branch reset to backup ref: %s\n", backupRef)
+	fmt.Fprintf(a.stdout, "previous HEAD backed up to: %s\n", currentBackupRef)
+	return 0
 }
 
 func (a *app) runChallenge(repo repository, graceSeconds int, armed bool) error {

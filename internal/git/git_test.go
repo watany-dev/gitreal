@@ -275,8 +275,8 @@ func TestBackupHead(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	runner := &fakeRunner{
 		responses: map[string]fakeResponse{
-			"/tmp/repo|update-ref\x00refs/gitreal/backups/feature-test/20260501T120000Z\x00HEAD": {},
-			"/tmp/repo|update-ref\x00refs/gitreal/backups/main/20260501T120000Z\x00HEAD": {
+			"/tmp/repo|update-ref\x00refs/gitreal/backups/feature-test/20260501T120000Z-000000000\x00HEAD": {},
+			"/tmp/repo|update-ref\x00refs/gitreal/backups/main/20260501T120000Z-000000000\x00HEAD": {
 				err: errors.New("boom"),
 			},
 		},
@@ -288,7 +288,7 @@ func TestBackupHead(t *testing.T) {
 		t.Fatalf("BackupHead() error = %v", err)
 	}
 
-	want := "refs/gitreal/backups/feature-test/20260501T120000Z"
+	want := "refs/gitreal/backups/feature-test/20260501T120000Z-000000000"
 	if ref != want {
 		t.Fatalf("BackupHead() = %q, want %q", ref, want)
 	}

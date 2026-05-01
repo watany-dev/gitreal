@@ -78,6 +78,11 @@ jobs:
           pattern: release-*
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          sha256sum dist/* > dist/SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

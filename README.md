@@ -53,6 +53,7 @@ git real start
 - Default mode is dry-run.
 - Destructive behavior must be explicitly armed with `git real arm`.
 - Before any reset, GitReal stores the current `HEAD` under `refs/gitreal/backups/...`.
+- `git real rescue restore <ref>` also backs up the current `HEAD` before restoring the selected backup ref.
 - Recovery is done with `git real rescue list` and `git real rescue restore <ref>`.
 
 ## Current Implementation
@@ -73,6 +74,13 @@ Current package layout:
 - `internal/git`: Git command wrapper and backup helpers
 - `internal/notify`: best-effort desktop notifications
 - `internal/challenge`: grace-period constants and normalization
+
+## Current Constraints
+
+- An upstream branch is required for challenge execution.
+- Detached `HEAD` is not supported.
+- Desktop notifications are best-effort and fall back to terminal output when unavailable.
+- `git real daemon` is not implemented in the current beta.
 
 ## Local Build Target
 
@@ -121,6 +129,7 @@ Release archives are published as:
 - `git-real_linux_amd64.tar.gz`
 - `git-real_linux_arm64.tar.gz`
 - `git-real_windows_amd64.zip`
+- `SHA256SUMS`
 
 ## Notes
 

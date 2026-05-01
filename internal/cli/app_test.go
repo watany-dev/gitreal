@@ -33,6 +33,7 @@ type fakeRepo struct {
 
 	setBoolCalls  map[string]bool
 	setIntCalls   map[string]int
+	backupCalls   []string
 	resetCalls    []string
 	fetchCalls    int
 	stashMessages []string
@@ -122,6 +123,7 @@ func (f *fakeRepo) AheadCount() (int, error) {
 }
 
 func (f *fakeRepo) BackupHead(branch string, now time.Time) (string, error) {
+	f.backupCalls = append(f.backupCalls, branch)
 	if f.backupErr != nil {
 		return "", f.backupErr
 	}
@@ -650,6 +652,8 @@ func TestRescueCommands(t *testing.T) {
 	t.Parallel()
 
 	repo := &fakeRepo{
+		currentBranch: "main",
+		backupRef:     "refs/gitreal/backups/main/current",
 		rescueRefs: []string{
 			"refs/gitreal/backups/main/1",
 			"refs/gitreal/backups/main/2",
@@ -674,6 +678,12 @@ func TestRescueCommands(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Current branch reset to backup ref: refs/gitreal/backups/main/1") {
 		t.Fatalf("stdout = %q, want restore success message", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "previous HEAD backed up to: "+repo.backupRef) {
+		t.Fatalf("stdout = %q, want current HEAD backup message", stdout.String())
+	}
+	if len(repo.backupCalls) != 1 || repo.backupCalls[0] != "main" {
+		t.Fatalf("backupCalls = %v, want current branch backup", repo.backupCalls)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -682,6 +692,28 @@ func TestRescueCommands(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "ref must start with refs/gitreal/backups/") {
 		t.Fatalf("stderr = %q, want backup prefix error", stderr.String())
+	}
+}
+
+func TestRescueRestoreStashPopFailure(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{
+		currentBranch: "main",
+		backupRef:     "refs/gitreal/backups/main/current",
+		stashDirty:    true,
+		stashPopErr:   errors.New("conflict"),
+	}
+	app, stdout, _, _, _ := newTestApp(repo)
+
+	if got := app.run([]string{"rescue", "restore", "refs/gitreal/backups/main/1"}); got != 0 {
+		t.Fatalf("rescue restore exit code = %d, want 0", got)
+	}
+	if !strings.Contains(stdout.String(), "stash pop failed") {
+		t.Fatalf("stdout = %q, want stash pop warning", stdout.String())
+	}
+	if len(repo.stashMessages) != 1 || !strings.Contains(repo.stashMessages[0], repo.backupRef) {
+		t.Fatalf("stashMessages = %v, want backup ref in stash message", repo.stashMessages)
 	}
 }
 
