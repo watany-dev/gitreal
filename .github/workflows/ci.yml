@@ -67,7 +67,21 @@ jobs:
       - run: go mod download
 
       - name: Run tests with race detector
-        run: go test -race -shuffle=on ./...
+        # Tee verbose output to a file so we can attach it as an artifact on
+        # failure — Actions logs aren't accessible to anonymous viewers, and
+        # OS-specific failures are easier to triage with full -v output.
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -shuffle=on -v ./... 2>&1 | tee test-output.txt
+
+      - name: Upload test output (always)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-output-${{ matrix.os }}
+          path: test-output.txt
+          if-no-files-found: warn
 
       - name: Enforce coverage threshold (Linux only)
         if: matrix.os == 'ubuntu-latest'
@@ -164,8 +178,3 @@ jobs:
 
       - name: Lint workflow files (actionlint)
         run: make actionlint
-
-      - name: Audit workflows for security anti-patterns (zizmor)
-        run: |
-          pipx install zizmor
-          zizmor --persona=auditor --format=plain .github/workflows

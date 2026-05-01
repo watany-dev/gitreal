@@ -22,6 +22,7 @@ func TestMainEndToEnd(t *testing.T) {
 	runGit(t, repoDir, "config", "user.name", "GitReal Test")
 	runGit(t, repoDir, "config", "user.email", "test@example.com")
 	runGit(t, repoDir, "config", "commit.gpgsign", "false")
+	runGit(t, repoDir, "config", "core.autocrlf", "false")
 
 	writeFile(t, filepath.Join(repoDir, "file.txt"), "base\n")
 	runGit(t, repoDir, "add", "file.txt")
@@ -129,6 +130,7 @@ func TestMainOnceCancelledByContext(t *testing.T) {
 	runGit(t, repoDir, "config", "user.name", "GitReal Test")
 	runGit(t, repoDir, "config", "user.email", "test@example.com")
 	runGit(t, repoDir, "config", "commit.gpgsign", "false")
+	runGit(t, repoDir, "config", "core.autocrlf", "false")
 
 	writeFile(t, filepath.Join(repoDir, "file.txt"), "base\n")
 	runGit(t, repoDir, "add", "file.txt")
